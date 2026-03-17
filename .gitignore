@@ -3,3 +3,4 @@ lib/
 .cache/
 .vscode/
 models/
+build/
