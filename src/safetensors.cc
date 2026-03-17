@@ -58,7 +58,7 @@ bool SafeTensors::load(const std::string filePath) {
 
         TensorInfo tensor_info;
         auto tensor_json = tensor.value();
-        tensor_info.name = tensor.key();
+        auto name = tensor.key();
 
         auto type_expected =
             parse_tensor_type(tensor_json["dtype"].get<std::string>());
@@ -78,10 +78,9 @@ bool SafeTensors::load(const std::string filePath) {
         tensor_info.data_ptr = mapped + tensors_data_base_offset + start_offset;
 
         std::println(
-            "{} {} {}",
-            tensor_info.name,
-            tensor_info.shape,
-            tensor_info.total_bytes);
+            "{} {} {}", name, tensor_info.shape, tensor_info.total_bytes);
+
+        tensors[name] = tensor_info;
     }
 
     return true;

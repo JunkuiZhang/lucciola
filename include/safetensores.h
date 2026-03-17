@@ -3,12 +3,12 @@
 #include "types.h"
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lucciola {
 
 struct TensorInfo {
-    std::string name;
     TensorType type;
     std::vector<int64_t> shape;
     char *data_ptr = nullptr;
@@ -26,6 +26,8 @@ class SafeTensors {
     int fd = -1;
     size_t file_size = 0;
     char *mapped = nullptr;
+
+    std::unordered_map<std::string, TensorInfo> tensors;
 };
 
 } // namespace lucciola
