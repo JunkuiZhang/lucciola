@@ -2,8 +2,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-namespace lucciola {
-namespace kernels {
+namespace lucciola::kernels {
 
 template <typename T>
 __global__ void embedding_forward_kernel(
@@ -52,7 +51,8 @@ void embedding_forward<__nv_bfloat16>(
     dim3 grid(seq_len);
     // 256 or 512 threads per block is generally good for memory copies.
     // If hidden_size is exactly 1024 or similar, 256 is enough to do 4 loops.
-    dim3 block(hidden_size / 8);
+    int thread_count = std::min(hidden_size / 8, 256);
+    dim3 block(thread_count);
 
     embedding_forward_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
         reinterpret_cast<__nv_bfloat16 *>(output),
@@ -64,5 +64,4 @@ void embedding_forward<__nv_bfloat16>(
         hidden_size / 8);
 }
 
-} // namespace kernels
-} // namespace lucciola
+} // namespace lucciola::kernels
