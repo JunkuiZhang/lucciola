@@ -1,0 +1,11 @@
+CompileFlags:
+  Add:
+    - -x
+    - cuda
+    - --cuda-gpu-arch=sm_89
+    - -L/opt/cuda/lib64
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - --expt-relaxed-constexpr
+    - --use_fast_math
+    - --generate-code=arch=compute_75,code=[compute_75,sm_75]
