@@ -48,7 +48,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(lucciola STATIC
     src/qwen.cc
+    src/safetensors.cc
 )
+target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
 add_executable(lucciola_chat examples/qwen.cc)
 target_link_libraries(lucciola_chat PRIVATE lucciola)

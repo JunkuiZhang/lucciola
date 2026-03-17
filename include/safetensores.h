@@ -6,10 +6,13 @@ namespace lucciola {
 
 class SafeTensors {
   public:
-    SafeTensors(const std::string &model_path);
+    SafeTensors();
     ~SafeTensors();
 
+    bool load(const std::string filePath);
+
   private:
+    int fd = -1;
 };
 
 } // namespace lucciola
