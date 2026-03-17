@@ -49,6 +49,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(lucciola STATIC
     src/qwen.cc
     src/safetensors.cc
+    src/gpu_arena.cc
 )
 target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
