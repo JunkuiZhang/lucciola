@@ -22,8 +22,8 @@ SafeTensors::~SafeTensors() {
         close(fd);
 }
 
-bool SafeTensors::load(const std::string filePath) {
-    fd = open(filePath.c_str(), O_RDONLY);
+bool SafeTensors::load(const std::string &file_path) {
+    fd = open(file_path.c_str(), O_RDONLY);
     if (fd == -1)
         return false;
 
