@@ -7,12 +7,20 @@
 
 #include <cuda_runtime.h>
 #include <nlohmann/json.hpp>
+#include <unistd.h>
 
 namespace lucciola {
 
 SafeTensors::SafeTensors() {}
 
-SafeTensors::~SafeTensors() {}
+SafeTensors::~SafeTensors() {
+    if (mapped != nullptr)
+        cudaHostUnregister(mapped);
+    if (mapped != MAP_FAILED && mapped != nullptr)
+        munmap(mapped, file_size);
+    if (fd != -1)
+        close(fd);
+}
 
 bool SafeTensors::load(const std::string filePath) {
     fd = open(filePath.c_str(), O_RDONLY);
@@ -23,10 +31,10 @@ bool SafeTensors::load(const std::string filePath) {
     if (fstat(fd, &sb) == -1)
         return false;
 
-    auto file_size = sb.st_size;
+    file_size = sb.st_size;
 
     // mmap
-    auto mapped = static_cast<char *>(
+    mapped = static_cast<char *>(
         mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
     if (mapped == MAP_FAILED)
         return false;
@@ -40,7 +48,41 @@ bool SafeTensors::load(const std::string filePath) {
     uint64_t header_size = *reinterpret_cast<uint64_t *>(mapped);
     std::string header_string(mapped + 8, header_size);
     nlohmann::json header_json = nlohmann::json::parse(header_string);
-    std::println("{}", header_json.dump());
+
+    auto tensors_data_base_offset = 8 + header_size;
+
+    for (auto &tensor : header_json.items()) {
+        if (tensor.key() == "__metadata__") {
+            continue;
+        }
+
+        TensorInfo tensor_info;
+        auto tensor_json = tensor.value();
+        tensor_info.name = tensor.key();
+
+        auto type_expected =
+            parse_tensor_type(tensor_json["dtype"].get<std::string>());
+        if (!type_expected) {
+            std::println(stderr, "{}", type_expected.error());
+            return false;
+        }
+
+        tensor_info.type = type_expected.value();
+
+        tensor_info.shape = tensor_json["shape"].get<std::vector<int64_t>>();
+
+        size_t start_offset = tensor_json["data_offsets"][0].get<size_t>();
+        size_t end_offset = tensor_json["data_offsets"][1].get<size_t>();
+
+        tensor_info.total_bytes = end_offset - start_offset;
+        tensor_info.data_ptr = mapped + tensors_data_base_offset + start_offset;
+
+        std::println(
+            "{} {} {}",
+            tensor_info.name,
+            tensor_info.shape,
+            tensor_info.total_bytes);
+    }
 
     return true;
 }
