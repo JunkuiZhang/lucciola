@@ -20,7 +20,7 @@ class SafeTensors {
     SafeTensors();
     ~SafeTensors();
 
-    bool load(const std::string filePath);
+    bool load(const std::string &file_path);
 
   private:
     int fd = -1;
