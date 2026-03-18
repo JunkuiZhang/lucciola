@@ -5,8 +5,6 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <queue>
-#include <sstream>
-#include <thread>
 
 using json = nlohmann::json;
 using namespace lucciola;
