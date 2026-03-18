@@ -64,4 +64,17 @@ void embedding_forward<__nv_bfloat16>(
         hidden_size / 8);
 }
 
+template <>
+void embedding_forward<short>(
+    void *output,
+    const int *input_ids,
+    const void *weight,
+    const int seq_len,
+    const int hidden_size,
+    const int vocab_size,
+    cudaStream_t stream) {
+    embedding_forward<__nv_bfloat16>(
+        output, input_ids, weight, seq_len, hidden_size, vocab_size, stream);
+}
+
 } // namespace lucciola::kernels

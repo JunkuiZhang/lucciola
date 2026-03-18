@@ -77,8 +77,8 @@ bool SafeTensors::load(const std::string &file_path) {
         tensor_info.total_bytes = end_offset - start_offset;
         tensor_info.data_ptr = mapped + tensors_data_base_offset + start_offset;
 
-        std::println(
-            "{} {} {}", name, tensor_info.shape, tensor_info.total_bytes);
+        // std::println(
+        //     "{} {} {}", name, tensor_info.shape, tensor_info.total_bytes);
 
         tensors[name] = tensor_info;
     }

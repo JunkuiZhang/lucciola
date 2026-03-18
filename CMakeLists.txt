@@ -48,6 +48,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(lucciola STATIC
     src/qwen.cc
+    src/tokenizer.cc
     src/safetensors.cc
     src/gpu_arena.cc
     src/kernels/embedding.cu

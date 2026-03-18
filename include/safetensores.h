@@ -22,6 +22,14 @@ class SafeTensors {
 
     bool load(const std::string &file_path);
 
+    const void *get_tensor(const std::string &name) const {
+        auto it = tensors.find(name);
+        if (it != tensors.end()) {
+            return it->second.data_ptr;
+        }
+        return nullptr;
+    }
+
   private:
     int fd = -1;
     size_t file_size = 0;
