@@ -52,6 +52,8 @@ add_library(lucciola STATIC
     src/gpu_arena.cc
     src/kernels/embedding.cu
     src/kernels/rmsnorm.cu
+    src/kernels/linear.cu
+    src/kernels/rope.cu
 )
 target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
