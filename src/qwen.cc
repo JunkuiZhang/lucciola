@@ -1,4 +1,5 @@
 #include "qwen.h"
+#include <cuda_bf16.h>
 #include <print>
 
 #include "kernels/add.h"
@@ -9,6 +10,7 @@
 #include "kernels/rmsnorm.h"
 #include "kernels/rope.h"
 #include "kernels/swiglu.h"
+#include "safetensores.h"
 
 #include <iostream>
 
@@ -64,18 +66,21 @@ QwenModel::QwenModel(const std::string &model_path)
 
     // 2. Load Safetensors
     std::string safetensors_path = model_path + "/model.safetensors";
-    bool load_success = safetensors_.load(safetensors_path);
+    SafeTensors safetensors;
+    bool load_success = safetensors.load(safetensors_path);
     if (!load_success) {
         std::println("Failed to load safetensores weights");
     }
 
     // 3. Bind Global Weights
-    embed_tokens_weight_ = safetensors_.get_tensor("model.embed_tokens.weight");
-    norm_weight_ = safetensors_.get_tensor("model.norm.weight");
-    lm_head_weight_ = safetensors_.get_tensor("lm_head.weight");
+    embed_tokens_weight_ =
+        safetensors.get_tensor<__nv_bfloat16>("model.embed_tokens.weight");
+    norm_weight_ = safetensors.get_tensor<__nv_bfloat16>("model.norm.weight");
+    lm_head_weight_ = safetensors.get_tensor<__nv_bfloat16>("lm_head.weight");
     // Some models tie lm_head and embed_tokens
-    if (!lm_head_weight_)
-        lm_head_weight_ = embed_tokens_weight_;
+    if (!lm_head_weight_.data())
+        lm_head_weight_ =
+            safetensors.get_tensor<__nv_bfloat16>("model.embed_tokens.weight");
 
     std::vector<short> debug_emb(8);
     cudaMemcpy(
@@ -104,7 +109,7 @@ QwenModel::QwenModel(const std::string &model_path)
 
     // 5. Assemble Transformer Pipeline
     for (int i = 0; i < config_.num_hidden_layers; ++i) {
-        blocks_.emplace_back(i, config_, arena_, safetensors_, max_seq_len);
+        blocks_.emplace_back(i, config_, arena_, safetensors, max_seq_len);
     }
 }
 
@@ -248,7 +253,7 @@ int QwenModel::decode(int last_token, int kv_seq_len) {
         config_.hidden_size,
         1e-6f,
         stream);
-        
+
     kernels::linear_forward(
         logits_buf_,
         hidden_states_buf_,
@@ -257,7 +262,7 @@ int QwenModel::decode(int last_token, int kv_seq_len) {
         config_.vocab_size,
         config_.hidden_size,
         stream);
-        
+
     kernels::argmax_forward(
         out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
 
@@ -282,18 +287,27 @@ QwenBlock::QwenBlock(
     std::string base = "model.layers." + std::to_string(layer_id);
 
     input_layernorm_weight_ =
-        safetensors.get_tensor(base + ".input_layernorm.weight");
-    post_attention_layernorm_weight_ =
-        safetensors.get_tensor(base + ".post_attention_layernorm.weight");
-    q_proj_weight_ = safetensors.get_tensor(base + ".self_attn.q_proj.weight");
-    k_proj_weight_ = safetensors.get_tensor(base + ".self_attn.k_proj.weight");
-    v_proj_weight_ = safetensors.get_tensor(base + ".self_attn.v_proj.weight");
-    o_proj_weight_ = safetensors.get_tensor(base + ".self_attn.o_proj.weight");
-    q_norm_weight_ = safetensors.get_tensor(base + ".self_attn.q_norm.weight");
-    k_norm_weight_ = safetensors.get_tensor(base + ".self_attn.k_norm.weight");
-    gate_proj_weight_ = safetensors.get_tensor(base + ".mlp.gate_proj.weight");
-    up_proj_weight_ = safetensors.get_tensor(base + ".mlp.up_proj.weight");
-    down_proj_weight_ = safetensors.get_tensor(base + ".mlp.down_proj.weight");
+        safetensors.get_tensor<__nv_bfloat16>(base + ".input_layernorm.weight");
+    post_attention_layernorm_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".post_attention_layernorm.weight");
+    q_proj_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.q_proj.weight");
+    k_proj_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.k_proj.weight");
+    v_proj_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.v_proj.weight");
+    o_proj_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.o_proj.weight");
+    q_norm_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.q_norm.weight");
+    k_norm_weight_ = safetensors.get_tensor<__nv_bfloat16>(
+        base + ".self_attn.k_norm.weight");
+    gate_proj_weight_ =
+        safetensors.get_tensor<__nv_bfloat16>(base + ".mlp.gate_proj.weight");
+    up_proj_weight_ =
+        safetensors.get_tensor<__nv_bfloat16>(base + ".mlp.up_proj.weight");
+    down_proj_weight_ =
+        safetensors.get_tensor<__nv_bfloat16>(base + ".mlp.down_proj.weight");
 
     // Persistent KV Cache allocating [max_seq_len, num_kv_heads, head_dim]
     k_cache_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
@@ -367,14 +381,25 @@ void QwenBlock::forward(
         stream);
 
     // 3. QK-Norm (Qwen3: per-head RMSNorm on Q and K before RoPE)
-    // Q shape: [num_tokens, num_heads, head_dim] — treat as [num_tokens*num_heads, head_dim]
+    // Q shape: [num_tokens, num_heads, head_dim] — treat as
+    // [num_tokens*num_heads, head_dim]
     kernels::rmsnorm_forward(
-        q_buf_, q_buf_, q_norm_weight_,
-        num_tokens * num_heads_, head_dim_, 1e-6f, stream);
+        q_buf_,
+        q_buf_,
+        q_norm_weight_,
+        num_tokens * num_heads_,
+        head_dim_,
+        1e-6f,
+        stream);
     // K shape: [num_tokens, num_kv_heads, head_dim]
     kernels::rmsnorm_forward(
-        k_buf_, k_buf_, k_norm_weight_,
-        num_tokens * num_kv_heads_, head_dim_, 1e-6f, stream);
+        k_buf_,
+        k_buf_,
+        k_norm_weight_,
+        num_tokens * num_kv_heads_,
+        head_dim_,
+        1e-6f,
+        stream);
 
     // 4. Rotary Position Embedding (RoPE)
     kernels::rope_forward(

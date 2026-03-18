@@ -1,7 +1,9 @@
 #pragma once
 
+#include "tensor.h"
 #include "types.h"
 #include <cstddef>
+#include <cuda_runtime.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,13 +24,22 @@ class SafeTensors {
 
     bool load(const std::string &file_path);
 
-    const void *get_tensor(const std::string &name) const {
+    template <typename T> Tensor<T> get_tensor(const std::string &name) const {
         auto it = tensors.find(name);
         if (it != tensors.end()) {
-            return it->second.data_ptr;
+            T *device_ptr = nullptr;
+            cudaMalloc(&device_ptr, it->second.total_bytes);
+            cudaMemcpy(
+                device_ptr,
+                it->second.data_ptr,
+                it->second.total_bytes,
+                cudaMemcpyDefault);
+            return Tensor<T>(device_ptr, it->second.type, it->second.shape);
         }
-        printf("CRITICAL ERROR: Tensor not found in model file: %s\n", name.c_str());
-        return nullptr;
+        printf(
+            "CRITICAL ERROR: Tensor not found in model file: %s\n",
+            name.c_str());
+        return Tensor<T>(nullptr, TensorType::BF16, {});
     }
 
   private:

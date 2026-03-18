@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <string>
 #include <vector>
@@ -30,6 +31,11 @@ class QwenBlock {
         int max_seq_len);
     ~QwenBlock();
 
+    QwenBlock(QwenBlock &&) noexcept = default;
+    QwenBlock &operator=(QwenBlock &&) noexcept = default;
+    QwenBlock(const QwenBlock &) = delete;
+    QwenBlock &operator=(const QwenBlock &) = delete;
+
     // The grand forward pass stitching all custom CUDA kernels together
     void forward(
         void *hidden_states,
@@ -47,17 +53,17 @@ class QwenBlock {
     int intermediate_size_;
 
     // Pointers to the model weights from SafeTensors
-    const void *input_layernorm_weight_;
-    const void *post_attention_layernorm_weight_;
-    const void *q_proj_weight_;
-    const void *k_proj_weight_;
-    const void *v_proj_weight_;
-    const void *o_proj_weight_;
-    const void *q_norm_weight_;
-    const void *k_norm_weight_;
-    const void *gate_proj_weight_;
-    const void *up_proj_weight_;
-    const void *down_proj_weight_;
+    Tensor<__nv_bfloat16> input_layernorm_weight_;
+    Tensor<__nv_bfloat16> post_attention_layernorm_weight_;
+    Tensor<__nv_bfloat16> q_proj_weight_;
+    Tensor<__nv_bfloat16> k_proj_weight_;
+    Tensor<__nv_bfloat16> v_proj_weight_;
+    Tensor<__nv_bfloat16> o_proj_weight_;
+    Tensor<__nv_bfloat16> q_norm_weight_;
+    Tensor<__nv_bfloat16> k_norm_weight_;
+    Tensor<__nv_bfloat16> gate_proj_weight_;
+    Tensor<__nv_bfloat16> up_proj_weight_;
+    Tensor<__nv_bfloat16> down_proj_weight_;
 
     // KV Cache
     void *k_cache_;
@@ -88,20 +94,19 @@ class QwenModel {
   private:
     QwenConfig config_;
     QwenTokenizer tokenizer_;
-    SafeTensors safetensors_;
     GpuArena arena_;
     std::vector<QwenBlock> blocks_;
 
     // Global Weights
-    const void *embed_tokens_weight_ = nullptr;
-    const void *norm_weight_ = nullptr;
-    const void *lm_head_weight_ = nullptr;
+    Tensor<__nv_bfloat16> embed_tokens_weight_;
+    Tensor<__nv_bfloat16> norm_weight_;
+    Tensor<__nv_bfloat16> lm_head_weight_;
 
     // Global generation buffers
     void *hidden_states_buf_ = nullptr;
     void *logits_buf_ = nullptr;
     int *out_token_buf_ = nullptr;
-    int *pos_ids_buf_ = nullptr; // GPU array for pos_ids
+    int *pos_ids_buf_ = nullptr;   // GPU array for pos_ids
     int *input_ids_buf_ = nullptr; // Persistent GPU array for input_ids
 };
 
