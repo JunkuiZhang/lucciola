@@ -54,6 +54,9 @@ add_library(lucciola STATIC
     src/kernels/rmsnorm.cu
     src/kernels/linear.cu
     src/kernels/rope.cu
+    src/kernels/attention.cu
+    src/kernels/swiglu.cu
+    src/kernels/argmax.cu
 )
 target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
