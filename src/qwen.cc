@@ -307,8 +307,9 @@ QwenBlock::QwenBlock(
         safetensors.get_tensor<__nv_bfloat16>(base + ".mlp.down_proj.weight");
 
     // Persistent KV Cache allocating [max_seq_len, num_kv_heads, head_dim]
-    k_cache_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
-    v_cache_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
+    // Moved to init_paged_kv_cache_auto
+    k_cache_ = nullptr;
+    v_cache_ = nullptr;
 
     // Q buf needs full [seq_len, num_heads * head_dim]
     q_buf_ = arena.alloc<short>(max_seq_len * num_heads_ * head_dim_);
@@ -498,4 +499,381 @@ void QwenBlock::forward(
         hidden_states, residual_buf_, num_tokens * hidden_size_, stream);
 }
 
+void QwenModel::init_paged_kv_cache(int max_blocks, int block_size) {
+    block_size_ = block_size;
+
+    // Allocate the unified pools per layer
+    size_t pool_size_tokens = max_blocks * block_size;
+    for (int i = 0; i < config_.num_hidden_layers; ++i) {
+        void *k_c;
+        void *v_c;
+        size_t layer_pool_bytes = pool_size_tokens *
+                                  config_.num_key_value_heads *
+                                  config_.head_dim * sizeof(short);
+        cudaMalloc(&k_c, layer_pool_bytes);
+        cudaMalloc(&v_c, layer_pool_bytes);
+        blocks_[i].set_kv_cache(k_c, v_c);
+    }
+
+    // allocate metadata buffers on GPU
+    if (!d_context_lens_) {
+        cudaMalloc(
+            &d_context_lens_, 10240 * sizeof(int)); // Max batch size assumption
+        cudaMalloc(&d_block_tables_, 10240 * 1024 * sizeof(int));
+    }
+}
+
+int QwenModel::init_paged_kv_cache_auto(int block_size, float mem_fraction) {
+    size_t free_mem, total_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+
+    // Safety check, keep at least 500MB free for other buffers
+    size_t reserved_mem = 500 * 1024 * 1024;
+    size_t usable_mem = free_mem > reserved_mem ? free_mem - reserved_mem : 0;
+
+    size_t target_mem = usable_mem * mem_fraction;
+
+    // Per token memory for KV cache (across all layers)
+    size_t token_bytes = 2 * config_.num_hidden_layers *
+                         config_.num_key_value_heads * config_.head_dim *
+                         sizeof(short);
+    size_t block_bytes = token_bytes * block_size;
+
+    int max_blocks = target_mem / block_bytes;
+
+    printf(
+        "\n[KV Cache] Total VRAM: %zu MB, Free VRAM: %zu MB\n",
+        total_mem / (1 << 20),
+        free_mem / (1 << 20));
+    printf(
+        "[KV Cache] Auto-allocating %d blocks (%.2f%% of free, %zu MB)!\n",
+        max_blocks,
+        mem_fraction * 100,
+        (max_blocks * block_bytes) / (1 << 20));
+
+    init_paged_kv_cache(max_blocks, block_size);
+    return max_blocks;
+}
+
+void QwenBlock::forward_paged(
+    void *hidden_states,
+    const InputMetadata &meta,
+    const int *d_context_lens,
+    const int *pos_ids,
+    const int *d_block_tables,
+    int block_size,
+    cudaStream_t stream) {
+
+    int num_seqs = meta.num_seqs;
+    int num_tokens =
+        meta.input_tokens
+            .size(); // for prefill it's sum of lens, for decode it's num_seqs
+
+    // Save Residual for Attention
+    cudaMemcpyAsync(
+        residual_buf_,
+        hidden_states,
+        num_tokens * hidden_size_ * sizeof(short),
+        cudaMemcpyDeviceToDevice,
+        stream);
+
+    // 1. Attention Pre-Norm
+    kernels::rmsnorm_forward(
+        hidden_states,
+        hidden_states,
+        input_layernorm_weight_,
+        num_tokens,
+        hidden_size_,
+        1e-6f,
+        stream);
+
+    // 2. QKV Projections
+    kernels::linear_forward(
+        q_buf_,
+        hidden_states,
+        q_proj_weight_,
+        num_tokens,
+        num_heads_ * head_dim_,
+        hidden_size_,
+        stream);
+    kernels::linear_forward(
+        k_buf_,
+        hidden_states,
+        k_proj_weight_,
+        num_tokens,
+        num_kv_heads_ * head_dim_,
+        hidden_size_,
+        stream);
+    kernels::linear_forward(
+        v_buf_,
+        hidden_states,
+        v_proj_weight_,
+        num_tokens,
+        num_kv_heads_ * head_dim_,
+        hidden_size_,
+        stream);
+
+    kernels::rmsnorm_forward(
+        q_buf_,
+        q_buf_,
+        q_norm_weight_,
+        num_tokens * num_heads_,
+        head_dim_,
+        1e-6f,
+        stream);
+    kernels::rmsnorm_forward(
+        k_buf_,
+        k_buf_,
+        k_norm_weight_,
+        num_tokens * num_kv_heads_,
+        head_dim_,
+        1e-6f,
+        stream);
+
+    // 4. RoPE
+    kernels::rope_forward(
+        q_buf_, pos_ids, num_tokens, num_heads_, head_dim_, 1000000.0f, stream);
+    kernels::rope_forward(
+        k_buf_,
+        pos_ids,
+        num_tokens,
+        num_kv_heads_,
+        head_dim_,
+        1000000.0f,
+        stream);
+
+    // 5. Append K/V to Paged Cache
+    int seq_len_per_req =
+        num_tokens /
+        num_seqs; // If we assume all seqs process same amount of tokens this
+                  // step... In real vLLM, Prefill and Decode are separate. For
+                  // Phase 1 we assume Decode-only or padding
+    if (meta.is_prompt) {
+        // Prefill - append everything
+        // For MVP we assume we process 1 sequence's prompt at a time or we pad
+        // them. Let's assume seq_len_per_req = prompt_len for simplicity of
+        // append.
+        seq_len_per_req = meta.context_lens[0];
+    } else {
+        seq_len_per_req = 1;
+    }
+
+    kernels::append_paged_kv_cache(
+        k_cache_,
+        v_cache_,
+        k_buf_,
+        v_buf_,
+        d_context_lens,
+        d_block_tables,
+        num_seqs,
+        seq_len_per_req,
+        num_kv_heads_,
+        head_dim_,
+        block_size,
+        meta.max_blocks_per_seq,
+        stream);
+
+    // 6. Attention Routing
+    if (meta.is_prompt) {
+        // Prefill uses intra-request self-attention over the current newly
+        // embedded tokens For MVP, we assume 1 sequence per prefill batch
+        kernels::prefill_attention_forward(
+            attn_out_buf_,
+            q_buf_,
+            k_buf_,
+            v_buf_,
+            seq_len_per_req, // length of the prompt
+            num_heads_,
+            num_kv_heads_,
+            head_dim_,
+            stream);
+    } else {
+        // Decode uses Paged Attention
+        kernels::paged_attention_forward(
+            attn_out_buf_,
+            q_buf_,
+            k_cache_,
+            v_cache_,
+            d_context_lens,
+            d_block_tables,
+            num_seqs,
+            num_heads_,
+            num_kv_heads_,
+            head_dim_,
+            block_size,
+            meta.max_blocks_per_seq,
+            stream);
+    }
+
+    // 7. Output proj
+    kernels::linear_forward(
+        hidden_states,
+        attn_out_buf_,
+        o_proj_weight_,
+        num_tokens,
+        hidden_size_,
+        num_heads_ * head_dim_,
+        stream);
+
+    // 8. Residual Add
+    kernels::add_forward(
+        hidden_states, residual_buf_, num_tokens * hidden_size_, stream);
+
+    cudaMemcpyAsync(
+        residual_buf_,
+        hidden_states,
+        num_tokens * hidden_size_ * sizeof(short),
+        cudaMemcpyDeviceToDevice,
+        stream);
+
+    // 9. MLP Pre-Norm
+    kernels::rmsnorm_forward(
+        hidden_states,
+        hidden_states,
+        post_attention_layernorm_weight_,
+        num_tokens,
+        hidden_size_,
+        1e-6f,
+        stream);
+
+    // 10. MLP SwiGLU
+    kernels::linear_forward(
+        mlp_gate_buf_,
+        hidden_states,
+        gate_proj_weight_,
+        num_tokens,
+        intermediate_size_,
+        hidden_size_,
+        stream);
+    kernels::linear_forward(
+        mlp_up_buf_,
+        hidden_states,
+        up_proj_weight_,
+        num_tokens,
+        intermediate_size_,
+        hidden_size_,
+        stream);
+    kernels::swiglu_forward(
+        mlp_out_buf_,
+        mlp_gate_buf_,
+        mlp_up_buf_,
+        num_tokens,
+        intermediate_size_,
+        stream);
+
+    // 11. MLP Output Projection
+    kernels::linear_forward(
+        hidden_states,
+        mlp_out_buf_,
+        down_proj_weight_,
+        num_tokens,
+        hidden_size_,
+        intermediate_size_,
+        stream);
+
+    // 12. MLP Residual Add
+    kernels::add_forward(
+        hidden_states, residual_buf_, num_tokens * hidden_size_, stream);
+}
+
+void QwenModel::step_with_paged_attention(InputMetadata &meta) {
+    int num_seqs = meta.num_seqs;
+    int num_tokens = meta.input_tokens.size();
+
+    // 1. H2D copy meta
+    cudaMemcpy(
+        d_context_lens_,
+        meta.context_lens.data(),
+        num_seqs * sizeof(int),
+        cudaMemcpyHostToDevice);
+    cudaMemcpy(
+        d_block_tables_,
+        meta.block_tables.data(),
+        meta.block_tables.size() * sizeof(int),
+        cudaMemcpyHostToDevice);
+    cudaMemcpy(
+        input_ids_buf_,
+        meta.input_tokens.data(),
+        num_tokens * sizeof(int),
+        cudaMemcpyHostToDevice);
+
+    // Construct pos_ids
+    std::vector<int> h_pos_ids;
+    for (int i = 0; i < num_seqs; i++) {
+        if (meta.is_prompt) {
+            for (int p = 0; p < meta.context_lens[i]; p++)
+                h_pos_ids.push_back(p);
+        } else {
+            h_pos_ids.push_back(meta.context_lens[i] - 1);
+        }
+    }
+    cudaMemcpy(
+        pos_ids_buf_,
+        h_pos_ids.data(),
+        num_tokens * sizeof(int),
+        cudaMemcpyHostToDevice);
+
+    // Embedding
+    kernels::embedding_forward<short>(
+        hidden_states_buf_,
+        input_ids_buf_,
+        embed_tokens_weight_,
+        num_tokens,
+        config_.hidden_size,
+        config_.vocab_size,
+        0);
+
+    for (auto &block : blocks_) {
+        // We'll call the newly integrated forward_paged.
+        block.forward_paged(
+            hidden_states_buf_,
+            meta,
+            d_context_lens_,
+            pos_ids_buf_,
+            d_block_tables_,
+            block_size_,
+            0);
+    }
+
+    kernels::rmsnorm_forward(
+        hidden_states_buf_,
+        hidden_states_buf_,
+        norm_weight_,
+        num_tokens,
+        config_.hidden_size,
+        1e-6f,
+        0);
+
+    // Extract next token
+    // For decode, hidden_states_buf has shape [num_seqs, hidden_size]
+    // For prefill MVP with 1 sequence, we take the last token of the prompt.
+    void *target_hidden_state = hidden_states_buf_;
+    if (meta.is_prompt) {
+        target_hidden_state = static_cast<short *>(hidden_states_buf_) +
+                              (num_tokens - 1) * config_.hidden_size;
+    }
+
+    kernels::linear_forward(
+        logits_buf_,
+        target_hidden_state,
+        lm_head_weight_,
+        num_seqs, // Valid for MVP (1 prefill seq) and Decode
+        config_.vocab_size,
+        config_.hidden_size,
+        0);
+
+    kernels::argmax_forward(
+        out_token_buf_, logits_buf_, num_seqs, config_.vocab_size, 0);
+
+    std::vector<int> next_tokens(num_seqs);
+    cudaMemcpy(
+        next_tokens.data(),
+        out_token_buf_,
+        num_seqs * sizeof(int),
+        cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < num_seqs; i++) {
+        meta.seqs[i]->append_token_id(next_tokens[i]);
+    }
+}
 } // namespace lucciola

@@ -7,6 +7,7 @@
 
 #include "gpu_arena.h"
 #include "safetensores.h"
+#include "sequence.h"
 #include "tokenizer.h"
 
 namespace lucciola {
@@ -42,6 +43,21 @@ class QwenBlock {
         int seq_len,
         int kv_seq_len,
         const int *pos_ids,
+        cudaStream_t stream = 0);
+
+    void set_kv_cache(void *k, void *v) {
+        k_cache_ = k;
+        v_cache_ = v;
+    }
+
+    // vLLM-style forward pass using PagedAttention
+    void forward_paged(
+        void *hidden_states,
+        const InputMetadata &meta,
+        const int *d_context_lens,
+        const int *pos_ids,
+        const int *d_block_tables,
+        int block_size,
         cudaStream_t stream = 0);
 
   private:
@@ -89,6 +105,12 @@ class QwenModel {
     int decode(int last_token, int kv_seq_len);
     std::vector<int>
     generate(const std::vector<int> &input_ids, int max_new_tokens);
+
+    // vLLM-style step driving continuous batching
+    void step_with_paged_attention(InputMetadata &meta);
+    void init_paged_kv_cache(int max_blocks, int block_size);
+    int init_paged_kv_cache_auto(int block_size, float mem_fraction = 0.9f);
+
     const QwenTokenizer &get_tokenizer() const { return tokenizer_; }
 
   private:
@@ -108,6 +130,11 @@ class QwenModel {
     int *out_token_buf_ = nullptr;
     int *pos_ids_buf_ = nullptr;   // GPU array for pos_ids
     int *input_ids_buf_ = nullptr; // Persistent GPU array for input_ids
+
+    // PagedAttention metadata buffers on GPU
+    int *d_context_lens_ = nullptr;
+    int *d_block_tables_ = nullptr;
+    int block_size_ = 16;
 };
 
 } // namespace lucciola

@@ -13,6 +13,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 FetchContent_Declare(
+  httplib
+  GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+  GIT_TAG v0.15.3
+)
+FetchContent_MakeAvailable(httplib)
+
+FetchContent_Declare(
   json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG v3.12.0
@@ -49,6 +56,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(lucciola STATIC
     src/qwen.cc
     src/tokenizer.cc
+    src/block_manager.cc
+    src/sequence.cc
+    src/scheduler.cc
+    src/async_engine.cc
     src/safetensors.cc
     src/gpu_arena.cc
     src/kernels/embedding.cu
@@ -58,16 +69,31 @@ add_library(lucciola STATIC
     src/kernels/attention.cu
     src/kernels/swiglu.cu
     src/kernels/argmax.cu
+    src/kernels/attention_paged.cu
     src/kernels/add.cu
 )
 target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
-add_executable(lucciola_chat examples/qwen.cc)
+add_executable(lucciola_chat examples/qwen_dynamic.cc)
 target_link_libraries(lucciola_chat PRIVATE lucciola)
 
 add_executable(lucciola_example examples/qwen_example.cc)
 target_link_libraries(lucciola_example PRIVATE lucciola)
+add_executable(async_server_mock examples/async_server_mock.cc)
+target_link_libraries(async_server_mock PRIVATE lucciola)
 
 # benchmarks
 add_executable(basic_bench benchmarks/basic_bench.cc)
 target_link_libraries(basic_bench PRIVATE lucciola)
+
+add_executable(http_server examples/http_server.cc)
+target_link_libraries(http_server PRIVATE lucciola httplib nlohmann_json::nlohmann_json)
+
+add_executable(async_bench benchmarks/async_bench.cc)
+target_link_libraries(async_bench PRIVATE lucciola)
+
+add_executable(benchmark_server benchmarks/benchmark_server.cc)
+target_link_libraries(benchmark_server PRIVATE lucciola httplib nlohmann_json::nlohmann_json)
+
+add_executable(benchmark_client benchmarks/benchmark_client.cc)
+target_link_libraries(benchmark_client PRIVATE httplib nlohmann_json::nlohmann_json)

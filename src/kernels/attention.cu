@@ -216,4 +216,51 @@ void kv_cache_attention_forward(
     cudaFree(d_score);
 }
 
+void prefill_attention_forward(
+    void *out,
+    const void *q,
+    const void *k,
+    const void *v,
+    const int seq_len,
+    const int num_heads,
+    const int num_kv_heads,
+    const int head_dim,
+    cudaStream_t stream) {
+
+    size_t score_bytes = (size_t)num_heads * seq_len * seq_len * sizeof(float);
+    float *d_score;
+    cudaMalloc(&d_score, score_bytes);
+
+    dim3 block_qk(16, 16, 1);
+    dim3 grid_qk((seq_len + 15) / 16, (seq_len + 15) / 16, num_heads);
+    qk_matmul_kernel<<<grid_qk, block_qk, 0, stream>>>(
+        d_score,
+        reinterpret_cast<const __nv_bfloat16 *>(q),
+        reinterpret_cast<const __nv_bfloat16 *>(k),
+        seq_len,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim);
+
+    dim3 block_sm(256, 1, 1);
+    dim3 grid_sm((seq_len + 255) / 256, num_heads, 1);
+    mask_softmax_kernel<<<grid_sm, block_sm, 0, stream>>>(
+        d_score, seq_len, 0, seq_len, num_heads);
+
+    dim3 block_v(16, 16, 1);
+    dim3 grid_v((head_dim + 15) / 16, (seq_len + 15) / 16, num_heads);
+    attn_v_matmul_kernel<<<grid_v, block_v, 0, stream>>>(
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        d_score,
+        reinterpret_cast<const __nv_bfloat16 *>(v),
+        seq_len,
+        0,
+        seq_len,
+        num_heads,
+        num_kv_heads,
+        head_dim);
+
+    cudaFree(d_score);
+}
 } // namespace lucciola::kernels
