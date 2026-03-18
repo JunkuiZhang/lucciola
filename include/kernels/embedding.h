@@ -2,8 +2,7 @@
 
 #include <cuda_runtime.h>
 
-namespace lucciola {
-namespace kernels {
+namespace lucciola::kernels {
 
 // Basic terminology:
 // output: pre-allocated GPU buffer to hold the result [seq_len, hidden_size]
@@ -20,5 +19,4 @@ void embedding_forward(
     const int vocab_size,
     cudaStream_t stream = nullptr);
 
-} // namespace kernels
-} // namespace lucciola
+} // namespace lucciola::kernels
