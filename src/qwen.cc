@@ -281,6 +281,8 @@ QwenBlock::QwenBlock(
     k_proj_weight_ = safetensors.get_tensor(base + ".self_attn.k_proj.weight");
     v_proj_weight_ = safetensors.get_tensor(base + ".self_attn.v_proj.weight");
     o_proj_weight_ = safetensors.get_tensor(base + ".self_attn.o_proj.weight");
+    q_norm_weight_ = safetensors.get_tensor(base + ".self_attn.q_norm.weight");
+    k_norm_weight_ = safetensors.get_tensor(base + ".self_attn.k_norm.weight");
     gate_proj_weight_ = safetensors.get_tensor(base + ".mlp.gate_proj.weight");
     up_proj_weight_ = safetensors.get_tensor(base + ".mlp.up_proj.weight");
     down_proj_weight_ = safetensors.get_tensor(base + ".mlp.down_proj.weight");
@@ -356,7 +358,17 @@ void QwenBlock::forward(
         hidden_size_,
         stream);
 
-    // 3. Rotary Position Embedding (RoPE)
+    // 3. QK-Norm (Qwen3: per-head RMSNorm on Q and K before RoPE)
+    // Q shape: [num_tokens, num_heads, head_dim] — treat as [num_tokens*num_heads, head_dim]
+    kernels::rmsnorm_forward(
+        q_buf_, q_buf_, q_norm_weight_,
+        num_tokens * num_heads_, head_dim_, 1e-6f, stream);
+    // K shape: [num_tokens, num_kv_heads, head_dim]
+    kernels::rmsnorm_forward(
+        k_buf_, k_buf_, k_norm_weight_,
+        num_tokens * num_kv_heads_, head_dim_, 1e-6f, stream);
+
+    // 4. Rotary Position Embedding (RoPE)
     kernels::rope_forward(
         q_buf_, pos_ids, num_tokens, num_heads_, head_dim_, 1000000.0f, stream);
     kernels::rope_forward(

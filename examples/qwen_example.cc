@@ -16,9 +16,9 @@ int main() {
 
     std::vector<int> out_tokens = qwen.generate(input_ids, 50);
 
-    std::cout << "\n\nRaw IDs: ";
+    std::cout << "\n\nOutput: ";
     for (int token : out_tokens) {
-        std::cout << token << " ";
+        std::cout << qwen.get_tokenizer().decode(token) << " ";
     }
     std::cout << "\n" << std::endl;
 

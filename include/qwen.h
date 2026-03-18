@@ -53,6 +53,8 @@ class QwenBlock {
     const void *k_proj_weight_;
     const void *v_proj_weight_;
     const void *o_proj_weight_;
+    const void *q_norm_weight_;
+    const void *k_norm_weight_;
     const void *gate_proj_weight_;
     const void *up_proj_weight_;
     const void *down_proj_weight_;
