@@ -1,11 +1,13 @@
 #include "kernels/argmax.h"
 #include <float.h>
 
+#include <cuda_bf16.h>
+
 namespace lucciola::kernels {
 
 __global__ void argmax_kernel(
     int *__restrict__ out_tokens,
-    const float *__restrict__ logits,
+    const __nv_bfloat16 *__restrict__ logits,
     const int vocab_size) {
 
     // One block handles exactly one token's entire vocabulary distribution
@@ -13,7 +15,7 @@ __global__ void argmax_kernel(
     int tid = threadIdx.x;
 
     // Pointer to the logits for this specific token
-    const float *token_logits = logits + token_idx * vocab_size;
+    const __nv_bfloat16 *token_logits = logits + token_idx * vocab_size;
 
     // 1. Thread-local max finding
     // Every thread strides through the vocabulary and finds its own local
@@ -22,7 +24,7 @@ __global__ void argmax_kernel(
     int local_max_idx = 0;
 
     for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float val = token_logits[i];
+        float val = __bfloat162float(token_logits[i]);
         if (val > local_max_val) {
             local_max_val = val;
             local_max_idx = i;
@@ -58,7 +60,7 @@ __global__ void argmax_kernel(
 
 void argmax_forward(
     int *out_tokens,
-    const float *logits,
+    const void *logits,
     const int num_tokens,
     const int vocab_size,
     cudaStream_t stream) {
@@ -70,7 +72,10 @@ void argmax_forward(
 
     // Note: Assuming block size is strictly 256 for the static shared memory
     // allocation
-    argmax_kernel<<<grid, block, 0, stream>>>(out_tokens, logits, vocab_size);
+    argmax_kernel<<<grid, block, 0, stream>>>(
+        out_tokens,
+        reinterpret_cast<const __nv_bfloat16 *>(logits),
+        vocab_size);
 }
 
 } // namespace lucciola::kernels

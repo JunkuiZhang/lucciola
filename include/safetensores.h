@@ -27,6 +27,7 @@ class SafeTensors {
         if (it != tensors.end()) {
             return it->second.data_ptr;
         }
+        printf("CRITICAL ERROR: Tensor not found in model file: %s\n", name.c_str());
         return nullptr;
     }
 

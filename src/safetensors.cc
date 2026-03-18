@@ -39,11 +39,21 @@ bool SafeTensors::load(const std::string &file_path) {
     if (mapped == MAP_FAILED)
         return false;
 
-    // Pinned memory
-    auto pinned_ret =
-        cudaHostRegister(mapped, file_size, cudaHostRegisterReadOnly);
-    if (pinned_ret != cudaSuccess)
+    // Pinned memory mapped to device
+    auto pinned_ret = cudaHostRegister(
+        mapped, file_size, cudaHostRegisterReadOnly | cudaHostRegisterMapped);
+    if (pinned_ret != cudaSuccess) {
+        std::println(
+            stderr, "Failed to cudaHostRegister! Error: {}", (int)pinned_ret);
         return false;
+    }
+
+    void *device_mapped = nullptr;
+    if (cudaHostGetDevicePointer(&device_mapped, mapped, 0) != cudaSuccess) {
+        std::println(stderr, "Failed to cudaHostGetDevicePointer!");
+        return false;
+    }
+    char *base_device_ptr = static_cast<char *>(device_mapped);
 
     uint64_t header_size = *reinterpret_cast<uint64_t *>(mapped);
     std::string header_string(mapped + 8, header_size);
@@ -75,7 +85,8 @@ bool SafeTensors::load(const std::string &file_path) {
         size_t end_offset = tensor_json["data_offsets"][1].get<size_t>();
 
         tensor_info.total_bytes = end_offset - start_offset;
-        tensor_info.data_ptr = mapped + tensors_data_base_offset + start_offset;
+        tensor_info.data_ptr =
+            base_device_ptr + tensors_data_base_offset + start_offset;
 
         // std::println(
         //     "{} {} {}", name, tensor_info.shape, tensor_info.total_bytes);

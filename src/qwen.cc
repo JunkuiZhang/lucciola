@@ -1,6 +1,7 @@
 #include "qwen.h"
 #include <print>
 
+#include "kernels/add.h"
 #include "kernels/argmax.h"
 #include "kernels/attention.h"
 #include "kernels/embedding.h"
@@ -9,11 +10,31 @@
 #include "kernels/rope.h"
 #include "kernels/swiglu.h"
 
+#include <iostream>
+
 #include <fstream>
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
 namespace lucciola {
+
+void print_tensor(const std::string &name, void *d_ptr, int size) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA ERROR [%s]: %s\n", name.c_str(), cudaGetErrorString(err));
+    }
+    std::vector<short> h_buf(std::min(size, 8));
+    cudaMemcpy(
+        h_buf.data(),
+        d_ptr,
+        h_buf.size() * sizeof(short),
+        cudaMemcpyDeviceToHost);
+    std::cout << name << ": ";
+    for (auto v : h_buf) {
+        printf("%04hX ", v);
+    }
+    std::cout << std::endl;
+}
 
 QwenModel::QwenModel(const std::string &model_path)
     : tokenizer_(model_path + "/vocab.json") {
@@ -26,6 +47,10 @@ QwenModel::QwenModel(const std::string &model_path)
         config_.hidden_size = data.value("hidden_size", 1536);
         config_.intermediate_size = data.value("intermediate_size", 8960);
         config_.num_attention_heads = data.value("num_attention_heads", 12);
+        config_.num_key_value_heads =
+            data.value("num_key_value_heads", config_.num_attention_heads);
+        config_.head_dim = data.value(
+            "head_dim", config_.hidden_size / config_.num_attention_heads);
         config_.num_hidden_layers = data.value("num_hidden_layers", 28);
         config_.vocab_size = data.value("vocab_size", 151936);
         std::println(
@@ -52,17 +77,27 @@ QwenModel::QwenModel(const std::string &model_path)
     if (!lm_head_weight_)
         lm_head_weight_ = embed_tokens_weight_;
 
-    // 4. Initialize GPU Arena (e.g. 1GB for buffers)
-    arena_.init(1024ULL * 1024 * 1024);
+    std::vector<short> debug_emb(8);
+    cudaMemcpy(
+        debug_emb.data(),
+        embed_tokens_weight_,
+        8 * sizeof(short),
+        cudaMemcpyDeviceToHost);
+    std::cout << "Embed PTR " << embed_tokens_weight_ << " Data: ";
+    for (auto v : debug_emb)
+        printf("%04hX ", v);
+    std::cout << std::endl;
+
+    // 4. Initialize GPU Arena (e.g. 4GB for buffers)
+    arena_.init(1024ULL * 1024 * 1024 * 4);
     int max_seq_len = 1024; // Hardcode max seq len for our buffers
 
     hidden_states_buf_ = arena_.alloc<float>(
         max_seq_len *
         config_.hidden_size); // BFloat16 but alloc space by size (using float
                               // to cover 4 bytes or short for 2)
-    // Actually we strictly use bfloat16 size (short)
     hidden_states_buf_ = arena_.alloc<short>(max_seq_len * config_.hidden_size);
-    logits_buf_ = arena_.alloc<float>(max_seq_len * config_.vocab_size);
+    logits_buf_ = arena_.alloc<short>(max_seq_len * config_.vocab_size);
     out_token_buf_ = arena_.alloc<int>(max_seq_len);
     pos_ids_buf_ = arena_.alloc<int>(max_seq_len);
 
@@ -80,7 +115,7 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
     int current_seq_len = input_ids.size();
 
     cudaStream_t stream = 0;
-    int max_seq_len = 1024;
+    int max_seq_len = 1024; // Static maximum for KV cache size
 
     // Upload input_ids array -> GPU memory
     int *d_input_ids; // Because input is small, transient malloc is okay.
@@ -106,6 +141,12 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
         "tokens)...",
         current_seq_len);
 
+    std::cout << "Input IDs: ";
+    for (int id : input_ids) {
+        std::cout << id << " ";
+    }
+    std::cout << std::endl;
+
     // 1. Embedding
     kernels::embedding_forward<short>(
         hidden_states_buf_,
@@ -119,7 +160,7 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
     // 2. Transformer Blocks
     for (auto &block : blocks_) {
         block.forward(
-            hidden_states_buf_, current_seq_len, pos_ids_buf_, stream);
+            hidden_states_buf_, current_seq_len, 0, pos_ids_buf_, stream);
     }
 
     // 3. Final LM Head and Argmax
@@ -144,12 +185,9 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
         config_.vocab_size,
         config_.hidden_size,
         stream);
+
     kernels::argmax_forward(
-        out_token_buf_,
-        static_cast<const float *>(logits_buf_),
-        1,
-        config_.vocab_size,
-        stream);
+        out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
 
     int next_token = 0;
     cudaMemcpy(
@@ -157,12 +195,68 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
 
     generated_ids.push_back(next_token);
 
+    // [Decode Stage] Autoregressive Generation
+    std::println("[Engine] Context memorized. Entering Decode Loop...");
+
+    for (int step = 0; step < max_new_tokens; ++step) {
+        if (next_token == 151645 || next_token == 151643) { // EOS tokens
+            break;
+        }
+
+        int kv_seq_len = current_seq_len;
+        current_seq_len++;
+        int seq_len = 1;
+
+        // Upload only the 1 next token
+        cudaMemcpy(
+            d_input_ids, &next_token, sizeof(int), cudaMemcpyHostToDevice);
+        int pos_id = kv_seq_len;
+        cudaMemcpy(pos_ids_buf_, &pos_id, sizeof(int), cudaMemcpyHostToDevice);
+
+        kernels::embedding_forward<short>(
+            hidden_states_buf_,
+            d_input_ids,
+            embed_tokens_weight_,
+            seq_len,
+            config_.hidden_size,
+            config_.vocab_size,
+            stream);
+
+        for (auto &block : blocks_) {
+            block.forward(
+                hidden_states_buf_, seq_len, kv_seq_len, pos_ids_buf_, stream);
+        }
+
+        kernels::rmsnorm_forward(
+            hidden_states_buf_,
+            hidden_states_buf_,
+            norm_weight_,
+            seq_len,
+            config_.hidden_size,
+            1e-6f,
+            stream);
+        kernels::linear_forward(
+            logits_buf_,
+            hidden_states_buf_,
+            lm_head_weight_,
+            1,
+            config_.vocab_size,
+            config_.hidden_size,
+            stream);
+        kernels::argmax_forward(
+            out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
+
+        cudaMemcpy(
+            &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
+        generated_ids.push_back(next_token);
+
+        // Console streaming effect
+        std::cout << tokenizer_.decode(next_token) << std::flush;
+    }
+
     // Cleanup transient
     cudaFree(d_input_ids);
 
-    // [Decode Stage omitted for absolute brevity to get Prefill working
-    // completely first] The Decode stage requires keeping track of persistent
-    // KV cache which our naive Attention doesn't do perfectly yet.
     return generated_ids;
 }
 
@@ -173,9 +267,9 @@ QwenBlock::QwenBlock(
     const SafeTensors &safetensors,
     int max_seq_len)
     : layer_id_(layer_id), hidden_size_(config.hidden_size),
-      num_heads_(config.num_attention_heads) {
-
-    head_dim_ = hidden_size_ / num_heads_;
+      num_heads_(config.num_attention_heads),
+      num_kv_heads_(config.num_key_value_heads), head_dim_(config.head_dim),
+      intermediate_size_(config.intermediate_size) {
 
     std::string base = "model.layers." + std::to_string(layer_id);
 
@@ -191,9 +285,15 @@ QwenBlock::QwenBlock(
     up_proj_weight_ = safetensors.get_tensor(base + ".mlp.up_proj.weight");
     down_proj_weight_ = safetensors.get_tensor(base + ".mlp.down_proj.weight");
 
-    q_buf_ = arena.alloc<short>(max_seq_len * hidden_size_);
-    k_buf_ = arena.alloc<short>(max_seq_len * hidden_size_);
-    v_buf_ = arena.alloc<short>(max_seq_len * hidden_size_);
+    // Persistent KV Cache allocating [max_seq_len, num_kv_heads, head_dim]
+    k_cache_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
+    v_cache_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
+
+    // Q buf needs full [seq_len, num_heads * head_dim]
+    q_buf_ = arena.alloc<short>(max_seq_len * num_heads_ * head_dim_);
+    // K and V temporal buffers [seq_len, num_kv_heads * head_dim]
+    k_buf_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
+    v_buf_ = arena.alloc<short>(max_seq_len * num_kv_heads_ * head_dim_);
     attn_out_buf_ = arena.alloc<short>(max_seq_len * hidden_size_);
     residual_buf_ = arena.alloc<short>(max_seq_len * hidden_size_);
     mlp_gate_buf_ = arena.alloc<short>(max_seq_len * config.intermediate_size);
@@ -204,7 +304,11 @@ QwenBlock::QwenBlock(
 QwenBlock::~QwenBlock() {}
 
 void QwenBlock::forward(
-    void *hidden_states, int seq_len, const int *pos_ids, cudaStream_t stream) {
+    void *hidden_states,
+    int seq_len,
+    int kv_seq_len,
+    const int *pos_ids,
+    cudaStream_t stream) {
 
     int num_tokens = seq_len;
 
@@ -226,13 +330,13 @@ void QwenBlock::forward(
         1e-6f,
         stream);
 
-    // 2. QKV Projections
+    // 2. QKV Projections (GQA aware)
     kernels::linear_forward(
         q_buf_,
         hidden_states,
         q_proj_weight_,
         num_tokens,
-        hidden_size_,
+        num_heads_ * head_dim_,
         hidden_size_,
         stream);
     kernels::linear_forward(
@@ -240,7 +344,7 @@ void QwenBlock::forward(
         hidden_states,
         k_proj_weight_,
         num_tokens,
-        hidden_size_,
+        num_kv_heads_ * head_dim_,
         hidden_size_,
         stream);
     kernels::linear_forward(
@@ -248,7 +352,7 @@ void QwenBlock::forward(
         hidden_states,
         v_proj_weight_,
         num_tokens,
-        hidden_size_,
+        num_kv_heads_ * head_dim_,
         hidden_size_,
         stream);
 
@@ -256,16 +360,26 @@ void QwenBlock::forward(
     kernels::rope_forward(
         q_buf_, pos_ids, num_tokens, num_heads_, head_dim_, 1000000.0f, stream);
     kernels::rope_forward(
-        k_buf_, pos_ids, num_tokens, num_heads_, head_dim_, 1000000.0f, stream);
+        k_buf_,
+        pos_ids,
+        num_tokens,
+        num_kv_heads_,
+        head_dim_,
+        1000000.0f,
+        stream);
 
-    // 4. Naive Multi-Head Attention
-    kernels::naive_attention_forward(
+    // 4. Naive Multi-Head Attention with KV Cache
+    kernels::kv_cache_attention_forward(
         attn_out_buf_,
         q_buf_,
         k_buf_,
         v_buf_,
+        k_cache_,
+        v_cache_,
         seq_len,
+        kv_seq_len,
         num_heads_,
+        num_kv_heads_,
         head_dim_,
         stream);
 
@@ -276,14 +390,20 @@ void QwenBlock::forward(
         o_proj_weight_,
         num_tokens,
         hidden_size_,
-        hidden_size_,
+        num_heads_ * head_dim_,
         stream);
 
-    // Residual Add (A real implementation needs a proper fusion kernel, we use
-    // naive loop copy here if needed, but omitted for simplicity. Let's just
-    // mock it since this block logic is illustrative). Just to allow it to pass
-    // gracefully:
-    // ... elementwise add ...
+    // 5.5 Residual Add
+    kernels::add_forward(
+        hidden_states, residual_buf_, num_tokens * hidden_size_, stream);
+
+    // Save Residual for MLP
+    cudaMemcpyAsync(
+        residual_buf_,
+        hidden_states,
+        num_tokens * hidden_size_ * sizeof(short),
+        cudaMemcpyDeviceToDevice,
+        stream);
 
     // 6. MLP Pre-Norm
     kernels::rmsnorm_forward(
@@ -296,14 +416,12 @@ void QwenBlock::forward(
         stream);
 
     // 7. MLP SwiGLU
-    int intermediate_size =
-        8960; // Usually matched dynamically, hardcoded for ease.
     kernels::linear_forward(
         mlp_gate_buf_,
         hidden_states,
         gate_proj_weight_,
         num_tokens,
-        intermediate_size,
+        intermediate_size_,
         hidden_size_,
         stream);
     kernels::linear_forward(
@@ -311,7 +429,7 @@ void QwenBlock::forward(
         hidden_states,
         up_proj_weight_,
         num_tokens,
-        intermediate_size,
+        intermediate_size_,
         hidden_size_,
         stream);
 
@@ -320,7 +438,7 @@ void QwenBlock::forward(
         mlp_gate_buf_,
         mlp_up_buf_,
         num_tokens,
-        intermediate_size,
+        intermediate_size_,
         stream);
 
     // 8. MLP Output Projection
@@ -330,8 +448,12 @@ void QwenBlock::forward(
         down_proj_weight_,
         num_tokens,
         hidden_size_,
-        intermediate_size,
+        intermediate_size_,
         stream);
+
+    // 8.5 MLP Residual Add
+    kernels::add_forward(
+        hidden_states, residual_buf_, num_tokens * hidden_size_, stream);
 }
 
 } // namespace lucciola

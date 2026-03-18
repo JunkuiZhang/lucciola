@@ -27,10 +27,10 @@ __global__ void embedding_forward_kernel(
     }
 
     // Base pointers for this specific token
-    const float4 *weight_row = reinterpret_cast<const float4 *>(
+    const float2 *weight_row = reinterpret_cast<const float2 *>(
         embedding_table + token_id * hidden_size);
-    float4 *output_row =
-        reinterpret_cast<float4 *>(output + token_idx * hidden_size);
+    float2 *output_row =
+        reinterpret_cast<float2 *>(output + token_idx * hidden_size);
 
     // Threads cooperatively copy the embedding row to the output.
     for (int i = threadIdx.x; i < tid_end; i += blockDim.x) {
@@ -51,7 +51,7 @@ void embedding_forward<__nv_bfloat16>(
     dim3 grid(seq_len);
     // 256 or 512 threads per block is generally good for memory copies.
     // If hidden_size is exactly 1024 or similar, 256 is enough to do 4 loops.
-    int thread_count = std::min(hidden_size / 8, 256);
+    int thread_count = std::min(hidden_size / 4, 256);
     dim3 block(thread_count);
 
     embedding_forward_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
@@ -61,7 +61,7 @@ void embedding_forward<__nv_bfloat16>(
         seq_len,
         hidden_size,
         vocab_size,
-        hidden_size / 8);
+        hidden_size / 4);
 }
 
 template <>

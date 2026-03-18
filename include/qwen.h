@@ -14,6 +14,8 @@ struct QwenConfig {
     int hidden_size;
     int intermediate_size;
     int num_attention_heads;
+    int num_key_value_heads;
+    int head_dim;
     int num_hidden_layers;
     int vocab_size;
 };
@@ -32,6 +34,7 @@ class QwenBlock {
     void forward(
         void *hidden_states,
         int seq_len,
+        int kv_seq_len,
         const int *pos_ids,
         cudaStream_t stream = 0);
 
@@ -39,7 +42,9 @@ class QwenBlock {
     int layer_id_;
     int hidden_size_;
     int num_heads_;
+    int num_kv_heads_;
     int head_dim_;
+    int intermediate_size_;
 
     // Pointers to the model weights from SafeTensors
     const void *input_layernorm_weight_;
@@ -51,6 +56,10 @@ class QwenBlock {
     const void *gate_proj_weight_;
     const void *up_proj_weight_;
     const void *down_proj_weight_;
+
+    // KV Cache
+    void *k_cache_;
+    void *v_cache_;
 
     // Intermediate activations from GpuArena
     void *q_buf_;

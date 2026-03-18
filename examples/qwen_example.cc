@@ -14,12 +14,13 @@ int main() {
 
     std::vector<int> input_ids = qwen.get_tokenizer().encode(input);
 
-    std::vector<int> out_tokens = qwen.generate(input_ids, 1);
+    std::vector<int> out_tokens = qwen.generate(input_ids, 50);
 
+    std::cout << "\n\nRaw IDs: ";
     for (int token : out_tokens) {
-        std::cout << qwen.get_tokenizer().decode(token) << std::flush;
+        std::cout << token << " ";
     }
-    std::cout << std::endl << std::endl;
+    std::cout << "\n" << std::endl;
 
     std::cout << "Engine Shutting Down." << std::endl;
     return 0;

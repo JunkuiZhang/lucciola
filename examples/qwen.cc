@@ -28,8 +28,8 @@ int main() {
 
         std::cout << "<< Qwen: " << std::flush;
 
-        // 2b. The Neural Network execution (Prefill generates 1 token)
-        std::vector<int> out_tokens = qwen.generate(input_ids, 1);
+        // 2b. The Neural Network execution (Prefill generates 100 tokens)
+        std::vector<int> out_tokens = qwen.generate(input_ids, 100);
 
         // 2c. De-tokenization Output
         for (int token : out_tokens) {

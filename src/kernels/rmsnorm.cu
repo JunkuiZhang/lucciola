@@ -9,7 +9,7 @@ namespace lucciola::kernels {
 
 __forceinline__ __device__ float warp_reduce_sum(float val) {
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        val = __shfl_down_sync(0xffffffff, val, offset);
+        val += __shfl_down_sync(0xffffffff, val, offset);
     }
     return val;
 }
@@ -51,15 +51,15 @@ __global__ void rmsnorm_forward_kernel(
 
     const __nv_bfloat16 *input_row = input + row_idx * hidden_size;
     __nv_bfloat16 *output_row = output + row_idx * hidden_size;
-    constexpr int bfloat_count = 8;
+    constexpr int bfloat_count = 4;
 
     // 1. Calculate sum of squares
     float sum_sq = 0.0f;
     int num_f4 = hidden_size / bfloat_count;
 
     for (int i = threadIdx.x; i < num_f4; i += blockDim.x) {
-        Pack128<__nv_bfloat16> pack =
-            load_128bit<__nv_bfloat16>(input_row + i * bfloat_count);
+        Pack64<__nv_bfloat16> pack =
+            load_64bit<__nv_bfloat16>(input_row + i * bfloat_count);
 
 #pragma unroll
         for (int j = 0; j < bfloat_count; ++j) {
@@ -80,11 +80,11 @@ __global__ void rmsnorm_forward_kernel(
 
     // 3. Normalize and scale
     for (int i = threadIdx.x; i < num_f4; i += blockDim.x) {
-        Pack128<__nv_bfloat16> in_pack =
-            load_128bit<__nv_bfloat16>(input_row + i * bfloat_count);
-        Pack128<__nv_bfloat16> w_pack =
-            load_128bit<__nv_bfloat16>(weight + i * bfloat_count);
-        Pack128<__nv_bfloat16> out_pack;
+        Pack64<__nv_bfloat16> in_pack =
+            load_64bit<__nv_bfloat16>(input_row + i * bfloat_count);
+        Pack64<__nv_bfloat16> w_pack =
+            load_64bit<__nv_bfloat16>(weight + i * bfloat_count);
+        Pack64<__nv_bfloat16> out_pack;
 
 #pragma unroll
         for (int j = 0; j < bfloat_count; ++j) {
@@ -93,7 +93,7 @@ __global__ void rmsnorm_forward_kernel(
             // out = (x / rms) * weight == (x * rsqrt) * weight
             out_pack.elements[j] = __float2bfloat16(val * rms * w);
         }
-        store_128bit(output_row + i * bfloat_count, out_pack);
+        store_64bit(output_row + i * bfloat_count, out_pack);
     }
 }
 

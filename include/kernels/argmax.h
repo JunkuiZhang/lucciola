@@ -19,7 +19,7 @@ namespace lucciola::kernels {
  */
 void argmax_forward(
     int *out_tokens,
-    const float *logits,
+    const void *logits,
     const int num_tokens,
     const int vocab_size,
     cudaStream_t stream = 0);

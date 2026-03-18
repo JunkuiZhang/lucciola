@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdio>
 
 namespace lucciola {
 
@@ -15,8 +16,10 @@ class GpuArena {
         size_t required_size = num_elements * sizeof(T);
         auto aligned_offset = (current_offset + 255) & (~255);
 
-        if (buffer_size - aligned_offset < required_size)
+        if (buffer_size - aligned_offset < required_size) {
+            printf("CRITICAL ERROR: GPU ARENA OUT OF MEMORY! Requested %zu, Available %zu\n", required_size, buffer_size - aligned_offset);
             return nullptr;
+        }
 
         T *ptr = reinterpret_cast<T *>(static_cast<char *>(buffer) + aligned_offset);
         current_offset = aligned_offset + required_size;
