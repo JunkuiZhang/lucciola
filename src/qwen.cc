@@ -100,6 +100,7 @@ QwenModel::QwenModel(const std::string &model_path)
     logits_buf_ = arena_.alloc<short>(max_seq_len * config_.vocab_size);
     out_token_buf_ = arena_.alloc<int>(max_seq_len);
     pos_ids_buf_ = arena_.alloc<int>(max_seq_len);
+    input_ids_buf_ = arena_.alloc<int>(max_seq_len);
 
     // 5. Assemble Transformer Pipeline
     for (int i = 0; i < config_.num_hidden_layers; ++i) {
@@ -114,28 +115,6 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
     std::vector<int> generated_ids;
     int current_seq_len = input_ids.size();
 
-    cudaStream_t stream = 0;
-    int max_seq_len = 1024; // Static maximum for KV cache size
-
-    // Upload input_ids array -> GPU memory
-    int *d_input_ids; // Because input is small, transient malloc is okay.
-    cudaMalloc(&d_input_ids, current_seq_len * sizeof(int));
-    cudaMemcpy(
-        d_input_ids,
-        input_ids.data(),
-        current_seq_len * sizeof(int),
-        cudaMemcpyHostToDevice);
-
-    // Upload pos_ids array [0, 1, 2, ...] -> GPU memory
-    std::vector<int> h_pos_ids(current_seq_len);
-    for (int i = 0; i < current_seq_len; i++)
-        h_pos_ids[i] = i;
-    cudaMemcpy(
-        pos_ids_buf_,
-        h_pos_ids.data(),
-        current_seq_len * sizeof(int),
-        cudaMemcpyHostToDevice);
-
     std::println(
         "\n[Engine] Starting Prefill Stage (Processing {} background "
         "tokens)...",
@@ -147,10 +126,52 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
     }
     std::cout << std::endl;
 
+    int next_token = prefill(input_ids);
+    generated_ids.push_back(next_token);
+
+    // [Decode Stage] Autoregressive Generation
+    std::println("[Engine] Context memorized. Entering Decode Loop...");
+
+    for (int step = 0; step < max_new_tokens; ++step) {
+        if (next_token == 151645 || next_token == 151643) { // EOS tokens
+            break;
+        }
+
+        next_token = decode(next_token, current_seq_len);
+        current_seq_len++;
+
+        generated_ids.push_back(next_token);
+
+        // Console streaming effect
+        std::cout << tokenizer_.decode(next_token) << std::flush;
+    }
+
+    return generated_ids;
+}
+
+int QwenModel::prefill(const std::vector<int> &input_ids) {
+    int current_seq_len = input_ids.size();
+    cudaStream_t stream = 0;
+
+    cudaMemcpy(
+        input_ids_buf_,
+        input_ids.data(),
+        current_seq_len * sizeof(int),
+        cudaMemcpyHostToDevice);
+
+    std::vector<int> h_pos_ids(current_seq_len);
+    for (int i = 0; i < current_seq_len; i++)
+        h_pos_ids[i] = i;
+    cudaMemcpy(
+        pos_ids_buf_,
+        h_pos_ids.data(),
+        current_seq_len * sizeof(int),
+        cudaMemcpyHostToDevice);
+
     // 1. Embedding
     kernels::embedding_forward<short>(
         hidden_states_buf_,
-        d_input_ids,
+        input_ids_buf_,
         embed_tokens_weight_,
         current_seq_len,
         config_.hidden_size,
@@ -193,71 +214,58 @@ QwenModel::generate(const std::vector<int> &input_ids, int max_new_tokens) {
     cudaMemcpy(
         &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
 
-    generated_ids.push_back(next_token);
+    return next_token;
+}
 
-    // [Decode Stage] Autoregressive Generation
-    std::println("[Engine] Context memorized. Entering Decode Loop...");
+int QwenModel::decode(int last_token, int kv_seq_len) {
+    cudaStream_t stream = 0;
+    int seq_len = 1;
 
-    for (int step = 0; step < max_new_tokens; ++step) {
-        if (next_token == 151645 || next_token == 151643) { // EOS tokens
-            break;
-        }
+    cudaMemcpy(
+        input_ids_buf_, &last_token, sizeof(int), cudaMemcpyHostToDevice);
+    int pos_id = kv_seq_len;
+    cudaMemcpy(pos_ids_buf_, &pos_id, sizeof(int), cudaMemcpyHostToDevice);
 
-        int kv_seq_len = current_seq_len;
-        current_seq_len++;
-        int seq_len = 1;
+    kernels::embedding_forward<short>(
+        hidden_states_buf_,
+        input_ids_buf_,
+        embed_tokens_weight_,
+        seq_len,
+        config_.hidden_size,
+        config_.vocab_size,
+        stream);
 
-        // Upload only the 1 next token
-        cudaMemcpy(
-            d_input_ids, &next_token, sizeof(int), cudaMemcpyHostToDevice);
-        int pos_id = kv_seq_len;
-        cudaMemcpy(pos_ids_buf_, &pos_id, sizeof(int), cudaMemcpyHostToDevice);
-
-        kernels::embedding_forward<short>(
-            hidden_states_buf_,
-            d_input_ids,
-            embed_tokens_weight_,
-            seq_len,
-            config_.hidden_size,
-            config_.vocab_size,
-            stream);
-
-        for (auto &block : blocks_) {
-            block.forward(
-                hidden_states_buf_, seq_len, kv_seq_len, pos_ids_buf_, stream);
-        }
-
-        kernels::rmsnorm_forward(
-            hidden_states_buf_,
-            hidden_states_buf_,
-            norm_weight_,
-            seq_len,
-            config_.hidden_size,
-            1e-6f,
-            stream);
-        kernels::linear_forward(
-            logits_buf_,
-            hidden_states_buf_,
-            lm_head_weight_,
-            1,
-            config_.vocab_size,
-            config_.hidden_size,
-            stream);
-        kernels::argmax_forward(
-            out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
-
-        cudaMemcpy(
-            &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
-        generated_ids.push_back(next_token);
-
-        // Console streaming effect
-        std::cout << tokenizer_.decode(next_token) << std::flush;
+    for (auto &block : blocks_) {
+        block.forward(
+            hidden_states_buf_, seq_len, kv_seq_len, pos_ids_buf_, stream);
     }
 
-    // Cleanup transient
-    cudaFree(d_input_ids);
+    kernels::rmsnorm_forward(
+        hidden_states_buf_,
+        hidden_states_buf_,
+        norm_weight_,
+        seq_len,
+        config_.hidden_size,
+        1e-6f,
+        stream);
+        
+    kernels::linear_forward(
+        logits_buf_,
+        hidden_states_buf_,
+        lm_head_weight_,
+        1,
+        config_.vocab_size,
+        config_.hidden_size,
+        stream);
+        
+    kernels::argmax_forward(
+        out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
 
-    return generated_ids;
+    int next_token = 0;
+    cudaMemcpy(
+        &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
+
+    return next_token;
 }
 
 QwenBlock::QwenBlock(

@@ -67,3 +67,6 @@ target_link_libraries(lucciola_chat PRIVATE lucciola)
 
 add_executable(lucciola_example examples/qwen_example.cc)
 target_link_libraries(lucciola_example PRIVATE lucciola)
+
+add_executable(lucciola_bench examples/lucciola_bench.cc)
+target_link_libraries(lucciola_bench PRIVATE lucciola)

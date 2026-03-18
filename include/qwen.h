@@ -79,6 +79,8 @@ class QwenModel {
     QwenModel(const std::string &model_path);
     ~QwenModel();
 
+    int prefill(const std::vector<int> &input_ids);
+    int decode(int last_token, int kv_seq_len);
     std::vector<int>
     generate(const std::vector<int> &input_ids, int max_new_tokens);
     const QwenTokenizer &get_tokenizer() const { return tokenizer_; }
@@ -100,6 +102,7 @@ class QwenModel {
     void *logits_buf_ = nullptr;
     int *out_token_buf_ = nullptr;
     int *pos_ids_buf_ = nullptr; // GPU array for pos_ids
+    int *input_ids_buf_ = nullptr; // Persistent GPU array for input_ids
 };
 
 } // namespace lucciola
