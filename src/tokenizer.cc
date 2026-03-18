@@ -15,7 +15,16 @@ QwenTokenizer::QwenTokenizer(const std::string &vocab_path) {
     }
 
     json vocab = json::parse(f);
-    id_to_token_.resize(vocab.size());
+
+    // Find max_id to properly size the vector
+    int max_id = 0;
+    for (auto &el : vocab.items()) {
+        int id = el.value();
+        if (id > max_id)
+            max_id = id;
+    }
+
+    id_to_token_.resize(max_id + 1);
 
     for (auto &el : vocab.items()) {
         std::string token = el.key();
@@ -25,7 +34,10 @@ QwenTokenizer::QwenTokenizer(const std::string &vocab_path) {
             id_to_token_[id] = token;
         }
     }
-    std::println("Loaded {} tokens into Vocab.", token_to_id_.size());
+    std::println(
+        "Loaded {} tokens into Vocab (Max ID: {}).",
+        token_to_id_.size(),
+        max_id);
 }
 
 // Build the forward GPT-2 bytes_to_unicode table.
@@ -37,9 +49,9 @@ static std::vector<std::string> build_byte_to_unicode_utf8() {
         for (int b = lo; b <= hi; ++b)
             b2u[b] = static_cast<char32_t>(b);
     };
-    add_range(0x21, 0x7E);   // '!' .. '~'
-    add_range(0xA1, 0xAC);   // '¡' .. '¬'
-    add_range(0xAE, 0xFF);   // '®' .. 'ÿ'
+    add_range(0x21, 0x7E); // '!' .. '~'
+    add_range(0xA1, 0xAC); // '¡' .. '¬'
+    add_range(0xAE, 0xFF); // '®' .. 'ÿ'
 
     int n = 0;
     for (int b = 0; b < 256; ++b) {
@@ -107,9 +119,12 @@ std::vector<int> QwenTokenizer::encode(const std::string &text) const {
             // Skip one UTF-8 character if nothing matches
             uint8_t c = static_cast<uint8_t>(current[0]);
             int skip = 1;
-            if ((c >> 5) == 0x06) skip = 2;
-            else if ((c >> 4) == 0x0E) skip = 3;
-            else if ((c >> 3) == 0x1E) skip = 4;
+            if ((c >> 5) == 0x06)
+                skip = 2;
+            else if ((c >> 4) == 0x0E)
+                skip = 3;
+            else if ((c >> 3) == 0x1E)
+                skip = 4;
             current = current.substr(skip);
         }
     }
@@ -126,9 +141,9 @@ static std::unordered_map<char32_t, uint8_t> build_unicode_to_byte() {
         for (int b = lo; b <= hi; ++b)
             u2b[static_cast<char32_t>(b)] = static_cast<uint8_t>(b);
     };
-    add_range(0x21, 0x7E);   // '!' .. '~'
-    add_range(0xA1, 0xAC);   // '¡' .. '¬'
-    add_range(0xAE, 0xFF);   // '®' .. 'ÿ'
+    add_range(0x21, 0x7E); // '!' .. '~'
+    add_range(0xA1, 0xAC); // '¡' .. '¬'
+    add_range(0xAE, 0xFF); // '®' .. 'ÿ'
 
     // Remaining bytes (0x00-0x20, 0x7F-0xA0, 0xAD) are mapped to U+0100..
     int n = 0;
@@ -161,13 +176,13 @@ std::string QwenTokenizer::decode(int id) const {
         int len = 1;
         if (c < 0x80) {
             cp = c;
-        } else if ((c >> 5) == 0x06) {     // 110xxxxx -> 2-byte
+        } else if ((c >> 5) == 0x06) { // 110xxxxx -> 2-byte
             cp = c & 0x1F;
             len = 2;
-        } else if ((c >> 4) == 0x0E) {     // 1110xxxx -> 3-byte
+        } else if ((c >> 4) == 0x0E) { // 1110xxxx -> 3-byte
             cp = c & 0x0F;
             len = 3;
-        } else if ((c >> 3) == 0x1E) {     // 11110xxx -> 4-byte
+        } else if ((c >> 3) == 0x1E) { // 11110xxx -> 4-byte
             cp = c & 0x07;
             len = 4;
         }

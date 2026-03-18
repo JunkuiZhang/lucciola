@@ -3,6 +3,10 @@
 #include <string>
 #include <vector>
 
+const int IM_START = 151644;
+const int IM_END = 151645;
+const int ENTER_ID = 1699;
+
 int main() {
     std::cout << "=============================================" << std::endl;
     std::cout << " Lucciola (Qwen3) Native CUDA Inference Core " << std::endl;
@@ -24,7 +28,24 @@ int main() {
         }
 
         // 2a. Real Tokenization
-        std::vector<int> input_ids = qwen.get_tokenizer().encode(input);
+        std::vector<int> input_ids;
+        input_ids.push_back(IM_START);
+        auto sys_ids =
+            qwen.get_tokenizer().encode("system\nYou are a helpful assistant.");
+        input_ids.insert(input_ids.end(), sys_ids.begin(), sys_ids.end());
+        input_ids.push_back(IM_END);
+        input_ids.push_back(ENTER_ID);
+
+        input_ids.push_back(IM_START);
+        auto user_ids = qwen.get_tokenizer().encode("user\n" + input);
+        input_ids.insert(input_ids.end(), user_ids.begin(), user_ids.end());
+        input_ids.push_back(IM_END);
+        input_ids.push_back(ENTER_ID);
+
+        input_ids.push_back(IM_START);
+        auto assistant_ids = qwen.get_tokenizer().encode("assistant\n");
+        input_ids.insert(
+            input_ids.end(), assistant_ids.begin(), assistant_ids.end());
 
         std::cout << "<< Qwen: " << std::flush;
 

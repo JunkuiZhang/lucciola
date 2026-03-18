@@ -82,17 +82,6 @@ QwenModel::QwenModel(const std::string &model_path)
         lm_head_weight_ =
             safetensors.get_tensor<__nv_bfloat16>("model.embed_tokens.weight");
 
-    std::vector<short> debug_emb(8);
-    cudaMemcpy(
-        debug_emb.data(),
-        embed_tokens_weight_,
-        8 * sizeof(short),
-        cudaMemcpyDeviceToHost);
-    std::cout << "Embed PTR " << embed_tokens_weight_ << " Data: ";
-    for (auto v : debug_emb)
-        printf("%04hX ", v);
-    std::cout << std::endl;
-
     // 4. Initialize GPU Arena (e.g. 4GB for buffers)
     arena_.init(1024ULL * 1024 * 1024 * 4);
     int max_seq_len = 1024; // Hardcode max seq len for our buffers
@@ -216,8 +205,12 @@ int QwenModel::prefill(const std::vector<int> &input_ids) {
         out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
 
     int next_token = 0;
-    cudaMemcpy(
+    cudaError_t err = cudaMemcpy(
         &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::println(
+            stderr, "CUDA Copy Error (Prefill): {}", cudaGetErrorString(err));
+    }
 
     return next_token;
 }
@@ -267,8 +260,12 @@ int QwenModel::decode(int last_token, int kv_seq_len) {
         out_token_buf_, logits_buf_, 1, config_.vocab_size, stream);
 
     int next_token = 0;
-    cudaMemcpy(
+    cudaError_t err = cudaMemcpy(
         &next_token, out_token_buf_, sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        std::println(
+            stderr, "CUDA Copy Error (Decode): {}", cudaGetErrorString(err));
+    }
 
     return next_token;
 }
