@@ -18,16 +18,16 @@ void kv_cache_attention_forward(
     const int head_dim,
     cudaStream_t stream = nullptr);
 
-void prefill_attention_forward(
-    void *out,
-    const void *q,
-    const void *k,
-    const void *v,
-    const int seq_len,
-    const int num_heads,
-    const int num_kv_heads,
-    const int head_dim,
-    cudaStream_t stream = nullptr);
+// void prefill_attention_forward(
+//     void *out,
+//     const void *q,
+//     const void *k,
+//     const void *v,
+//     const int seq_len,
+//     const int num_heads,
+//     const int num_kv_heads,
+//     const int head_dim,
+//     cudaStream_t stream = nullptr);
 
 // PagedAttention ??????????????????
 void paged_attention_forward(
