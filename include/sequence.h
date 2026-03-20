@@ -46,6 +46,8 @@ using SequencePtr = std::shared_ptr<Sequence>;
 struct InputMetadata {
     std::vector<int>
         input_tokens; // The tokens to actually compute in this step
+    std::vector<int>
+        input_pos; // The absolute position of each token (for RoPE)
     std::vector<int> context_lens; // Context length for each seq in the batch
     std::vector<int> block_tables; // Flattened block tables for PagedAttention
                                    // [batch_size * max_blocks]

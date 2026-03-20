@@ -818,20 +818,10 @@ void QwenModel::step_with_paged_attention(InputMetadata &meta) {
         num_tokens * sizeof(int),
         cudaMemcpyHostToDevice);
 
-    // Construct pos_ids
-    std::vector<int> h_pos_ids;
-    for (int i = 0; i < meta.num_decode_seqs; i++) {
-        h_pos_ids.push_back(meta.context_lens[i] - 1);
-    }
-    for (int i = meta.num_decode_seqs; i < num_seqs; i++) {
-        int chunk_size = meta.num_prefill_tokens;
-        int start_pos = meta.context_lens[i] - chunk_size;
-        for (int p = start_pos; p < meta.context_lens[i]; p++)
-            h_pos_ids.push_back(p);
-    }
+    // Use absolute position ids from meta.input_pos
     cudaMemcpy(
         pos_ids_buf_,
-        h_pos_ids.data(),
+        meta.input_pos.data(),
         num_tokens * sizeof(int),
         cudaMemcpyHostToDevice);
 

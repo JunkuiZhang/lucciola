@@ -66,6 +66,8 @@ InputMetadata Scheduler::step() {
             meta.seqs.push_back(seq);
             meta.context_lens.push_back(seq->get_len());
             meta.input_tokens.push_back(seq->get_token_ids().back());
+            meta.input_pos.push_back(
+                seq->get_len() - 1); // absolute position for decode
             meta.num_decode_seqs++;
             total_tokens_this_step++;
         }
@@ -100,6 +102,7 @@ InputMetadata Scheduler::step() {
                 auto const &tokens = seq->get_token_ids();
                 for (int i = seq->get_prefill_offset(); i < total_len; ++i) {
                     meta.input_tokens.push_back(tokens[i]);
+                    meta.input_pos.push_back(i); // absolute position in prompt
                 }
 
                 meta.num_prefill_seqs++;
