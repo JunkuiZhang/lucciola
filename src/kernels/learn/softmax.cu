@@ -133,6 +133,68 @@ __global__ void warp_softmax_kernel(float *scores, int valid_len) {
     }
 }
 
+__global__ void
+batched_warp_softmax_kernel(float *scores, int valid_len, int num_rows) {
+    // ==========================================
+    // TODO 1: 灵魂三问 - 计算各种 ID
+    // ==========================================
+    // 1. 计算本线程在 Warp 内部的编号 (0 到 31)
+    int lane_id = threadIdx.x & 31;
+
+    // 2. 计算本线程所属的 Warp 在当前 Block 内部的编号 (比如 128 个线程就是 0
+    // 到 3)
+    int warp_id = threadIdx.x / 32;
+
+    // 3. 计算当前 Warp 负责处理的“全局矩阵行号”
+    // 提示：blockIdx.x 表示当前是第几个 Block，(blockDim.x / 32) 表示一个 Block
+    // 里有几个 Warp
+    int num_warps_in_block = blockDim.x / 32;
+    int row_id = blockIdx.x * num_warps_in_block + warp_id;
+
+    // 【极其重要】越界保护：如果行号超出了实际矩阵行数，直接退出
+    if (row_id >= num_rows)
+        return;
+
+    // ==========================================
+    // TODO 2: 找到属于你的数据
+    // ==========================================
+    // 计算当前行在全局展平数组 scores 中的起始指针
+    float *row_scores = scores + row_id * valid_len;
+
+    // ==========================================
+    // TODO 3: 复制粘贴的艺术 —— 将单行逻辑平移过来
+    // ==========================================
+    // 请把你上节课写的完美的 3
+    // 个步骤（跨步更新、Warp规约广播、跨步写回）搬过来。 【注意微调】：
+    // 1. 之前跨步循环是 index += blockDim.x，现在一个 Warp 只有 32
+    // 人，所以必须是 index += 32
+    // 2. 之前初始是 index = tid，现在必须是 index = lane_id
+    // 3. 数组访问全都改成访问 row_scores[index]
+
+    float thread_max = -FLT_MAX;
+    float thread_sum = 0.0f;
+
+    // 步骤 A: Stride loop for max and sum (index += 32)
+    for (int index = lane_id; index < valid_len; index += 32) {
+        float old_max = thread_max;
+        thread_max = fmaxf(thread_max, row_scores[index]);
+        thread_sum = thread_sum * __expf(old_max - thread_max) +
+                     __expf(row_scores[index] - thread_max);
+    }
+
+    // 步骤 B: Warp Reduction & Broadcast (依然是用 0 号线程广播)
+    float global_max = warpReduceMax(thread_max);
+    global_max = __shfl_sync(FULL_MASK, global_max, 0);
+    float global_sum = thread_sum * __expf(thread_max - global_max);
+    global_sum = warpReduceSum(global_sum);
+    global_sum = __shfl_sync(FULL_MASK, global_sum, 0);
+
+    // 步骤 C: Stride loop for write back (index += 32)
+    for (int index = lane_id; index < valid_len; index += 32) {
+        row_scores[index] = __expf(row_scores[index] - global_max) / global_sum;
+    }
+}
+
 // 2. 宿主端包装器
 void naive_softmax_forward(float *scores, int valid_len, cudaStream_t stream) {
     // 启动 1 个 Block，每个 Block 只有 1 个 Thread (最慢但最安全的版本)
@@ -154,6 +216,19 @@ void warp_softmax_forward(float *scores, int valid_len, cudaStream_t stream) {
     dim3 block(32);
 
     warp_softmax_kernel<<<grid, block, 0, stream>>>(scores, valid_len);
+}
+
+// 宿主端调用示例 (不用你写，看看就行)：
+void batched_warp_softmax_forward(
+    float *scores, int valid_len, int num_rows, cudaStream_t stream) {
+    int threads_per_block = 128;
+    int warps_per_block = threads_per_block / 32; // 4
+
+    // 计算需要多少个 Block 才能覆盖所有的行 (向上取整)
+    int blocks = (num_rows + warps_per_block - 1) / warps_per_block;
+
+    batched_warp_softmax_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        scores, valid_len, num_rows);
 }
 
 } // namespace lucciola::kernels::learn

@@ -66,6 +66,27 @@ int main() {
     }
     std::cout << std::endl;
 
+    for (int index = 0; index < long_num_tokens; ++index) {
+        h_scores_1[index] = (float)(index + 1);
+    }
+    cudaMemcpy(
+        long_d_scores,
+        h_scores_1,
+        long_num_tokens * sizeof(float),
+        cudaMemcpyHostToDevice);
+    lucciola::kernels::learn::batched_warp_softmax_forward(
+        long_d_scores, long_num_tokens, 1, 0);
+    cudaMemcpy(
+        h_scores_1,
+        long_d_scores,
+        long_num_tokens * sizeof(float),
+        cudaMemcpyDeviceToHost);
+    std::cout << "Batched Warp Softmax Scores: ";
+    for (int i = 0; i < long_num_tokens; i++) {
+        std::cout << h_scores_1[i] << " ";
+    }
+    std::cout << std::endl;
+
     cudaFree(long_d_scores);
     return 0;
 }
