@@ -71,6 +71,7 @@ add_library(lucciola STATIC
     src/kernels/argmax.cu
     src/kernels/attention_paged.cu
     src/kernels/add.cu
+    src/kernels/learn/softmax.cu
 )
 target_link_libraries(lucciola PUBLIC nlohmann_json::nlohmann_json CUDA::cudart)
 
@@ -97,3 +98,7 @@ target_link_libraries(benchmark_server PRIVATE lucciola httplib nlohmann_json::n
 
 add_executable(benchmark_client benchmarks/benchmark_client.cc)
 target_link_libraries(benchmark_client PRIVATE httplib nlohmann_json::nlohmann_json)
+
+# learn
+add_executable(learn_softmax learn/softmax/main.cc)
+target_link_libraries(learn_softmax PRIVATE lucciola)
