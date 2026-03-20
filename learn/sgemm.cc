@@ -138,6 +138,25 @@ int main() {
         ms,
         (flops / 1e9) / (ms / 1000.0f));
 
+    // ---------------------------------------------------------
+    // 测试 5: CUTLASS GEMM
+    // ---------------------------------------------------------
+    cudaMemset(d_C, 0, size_C);
+    cudaEventRecord(start);
+    lucciola::kernels::learn::sgemm_cutlass_forward(d_C, d_A, d_B, M, N, K, 0);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+
+    cudaMemcpy(h_C_gpu, d_C, size_C, cudaMemcpyDeviceToHost);
+    bool cutlass_pass = verify_matrix(h_C_cpu, h_C_gpu, M, N);
+    printf(
+        "CUTLASS GEMM  | Correct: %s | Time: %8.3f ms | Performance: %8.2f "
+        "GFLOPS\n",
+        cutlass_pass ? "YES" : "NO",
+        ms,
+        (flops / 1e9) / (ms / 1000.0f));
+
     // 清理
     cudaFree(d_A);
     cudaFree(d_B);

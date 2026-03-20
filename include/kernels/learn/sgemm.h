@@ -31,4 +31,13 @@ void sgemm_register_tiled_forward(
     int K,
     cudaStream_t stream);
 
+void sgemm_cutlass_forward(
+    float *C,
+    const float *A,
+    const float *B,
+    int M,
+    int N,
+    int K,
+    cudaStream_t stream);
+
 } // namespace lucciola::kernels::learn

@@ -1,6 +1,53 @@
 #include "kernels/learn/sgemm.h"
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/layout/matrix.h>
 
 namespace lucciola::kernels::learn {
+
+void sgemm_cutlass_forward(
+    float *C,
+    const float *A,
+    const float *B,
+    int M,
+    int N,
+    int K,
+    cudaStream_t stream) {
+    using RowMajor = cutlass::layout::RowMajor;
+    using Gemm = cutlass::gemm::device::
+        Gemm<float, RowMajor, float, RowMajor, float, RowMajor, float>;
+
+    Gemm gemm_op;
+
+    // Construct arguments
+    typename Gemm::Arguments args(
+        {M, N, K}, // GemmCoord
+        {A, K},    // A: pointer, stride
+        {B, N},    // B: pointer, stride
+        {C, N},    // C: pointer, stride
+        {C, N},    // D: pointer, stride (output)
+        {1.0f, 0.0f});
+
+    size_t workspace_size = gemm_op.get_workspace_size(args);
+
+    void *workspace = nullptr;
+    if (workspace_size > 0) {
+        cudaError_t e = cudaMalloc(&workspace, workspace_size);
+        if (e != cudaSuccess) {
+            printf(
+                "[CUTLASS] workspace alloc failed: %s\n",
+                cudaGetErrorString(e));
+            return;
+        }
+    }
+
+    cutlass::Status status = gemm_op.initialize(args, workspace, stream);
+    if (status == cutlass::Status::kSuccess) {
+        status = gemm_op.run(stream);
+    }
+
+    if (workspace)
+        cudaFree(workspace);
+}
 
 const int BLOCK_SIZE = 16;
 

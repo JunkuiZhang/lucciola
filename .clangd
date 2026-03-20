@@ -8,4 +8,4 @@ CompileFlags:
     - -forward-unknown-to-host-compiler
     - --expt-relaxed-constexpr
     - --use_fast_math
-    - --generate-code=arch=compute_75,code=[compute_75,sm_75]
+    - --generate-code=arch=compute_89,code=[compute_89,sm_89]

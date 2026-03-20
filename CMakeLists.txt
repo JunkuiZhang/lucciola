@@ -26,6 +26,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
+FetchContent_Declare(
+  cutlass
+  GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
+  GIT_TAG v4.4.2
+)
+FetchContent_MakeAvailable(cutlass)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
 set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/lib)
@@ -38,7 +45,10 @@ set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION OFF)
 
 find_package(CUDAToolkit REQUIRED)
-include_directories(${CUDAToolkit_INCLUDE_DIRS})
+include_directories(${CUDAToolkit_INCLUDE_DIRS} ${cutlass_SOURCE_DIR}/include)
+
+# Only build for Ada Lovelace (sm_89)
+set(CMAKE_CUDA_ARCHITECTURES 89)
 
 if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
     add_compile_options(
