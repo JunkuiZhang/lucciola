@@ -112,6 +112,32 @@ int main() {
         ms,
         (flops / 1e9) / (ms / 1000.0f));
 
+    // ---------------------------------------------------------
+    // 测试 4: GPU Register Tiled 版本
+    // ---------------------------------------------------------
+    cudaMemset(d_C, 0, size_C);
+
+    // 注意！我们现在的 Block 大小变了！
+    // 规定了 16x16=256 个线程，每个线程算 4x4，所以一个 Block 算 64x64
+    dim3 reg_block(16, 16);
+    dim3 reg_grid((N + 64 - 1) / 64, (M + 64 - 1) / 64);
+
+    cudaEventRecord(start);
+    lucciola::kernels::learn::sgemm_register_tiled_forward(
+        d_C, d_A, d_B, M, N, K, 0);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+
+    cudaMemcpy(h_C_gpu, d_C, size_C, cudaMemcpyDeviceToHost);
+    bool reg_pass = verify_matrix(h_C_cpu, h_C_gpu, M, N);
+    printf(
+        "Register Tiled| Correct: %s | Time: %8.3f ms | Performance: %8.2f "
+        "GFLOPS\n",
+        reg_pass ? "YES" : "NO",
+        ms,
+        (flops / 1e9) / (ms / 1000.0f));
+
     // 清理
     cudaFree(d_A);
     cudaFree(d_B);
