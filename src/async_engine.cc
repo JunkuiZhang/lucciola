@@ -124,31 +124,32 @@ void AsyncEngine::engine_loop() {
                     auto seq = meta.seqs[i];
                     int req_id = seq->get_seq_id();
 
+                    bool is_prefilling =
+                        (i >= meta.num_decode_seqs) &&
+                        (seq->get_prefill_offset() < seq->get_prompt_len());
+                    if (is_prefilling) {
+                        continue; // Skip processing completely if still
+                                  // chunking prompt
+                    }
+
                     int next_token = seq->get_token_ids().back();
                     bool is_finished = false;
                     std::string text_chunk = "";
 
-                    if (!meta.is_prompt) { // Meaning we generated a decode
-                                           // token
-                        text_chunk = model_.get_tokenizer().decode(next_token);
-                        active_requests_[req_id].generated_tokens++;
-                    }
+                    text_chunk = model_.get_tokenizer().decode(next_token);
+                    active_requests_[req_id].generated_tokens++;
 
                     // Check stop condition
-                    if (!meta.is_prompt) {
-                        if (next_token == 151645 || next_token == 151643 ||
-                            active_requests_[req_id].generated_tokens >=
-                                active_requests_[req_id].max_new_tokens) {
-                            is_finished = true;
-                        }
+                    if (next_token == 151645 || next_token == 151643 ||
+                        active_requests_[req_id].generated_tokens >=
+                            active_requests_[req_id].max_new_tokens) {
+                        is_finished = true;
                     }
 
                     // Callback
-                    if (!meta.is_prompt) {
-                        if (active_requests_[req_id].stream_cb) {
-                            active_requests_[req_id].stream_cb(
-                                text_chunk, is_finished);
-                        }
+                    if (active_requests_[req_id].stream_cb) {
+                        active_requests_[req_id].stream_cb(
+                            text_chunk, is_finished);
                     }
 
                     if (is_finished) {

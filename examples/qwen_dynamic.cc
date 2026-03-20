@@ -87,7 +87,7 @@ int main() {
                 int next_token = meta.seqs[0]->get_token_ids().back();
 
                 // Print only in decode phase
-                if (!meta.is_prompt) {
+                if (0 < meta.num_decode_seqs) {
                     std::cout << qwen.get_tokenizer().decode(next_token)
                               << std::flush;
                     generated_count++;

@@ -20,6 +20,9 @@ class Sequence {
     int get_prompt_len() const { return prompt_len_; }
     const std::vector<int> &get_token_ids() const { return token_ids_; }
 
+    int get_prefill_offset() const { return prefill_offset_; }
+    void set_prefill_offset(int offset) { prefill_offset_ = offset; }
+
     void append_token_id(int token_id);
 
     // Block logic
@@ -32,6 +35,7 @@ class Sequence {
     int seq_id_;
     SequenceStatus status_;
     int prompt_len_;
+    int prefill_offset_;
     int block_size_;
     std::vector<int> token_ids_;
     std::vector<int> physical_blocks_;
@@ -48,7 +52,10 @@ struct InputMetadata {
     int max_blocks_per_seq;
     int num_seqs;
     std::vector<SequencePtr> seqs; // Reference to running sequences
-    bool is_prompt;                // true for Prefill, false for Decode
+
+    int num_decode_seqs = 0;
+    int num_prefill_seqs = 0;
+    int num_prefill_tokens = 0;
 };
 
 } // namespace lucciola

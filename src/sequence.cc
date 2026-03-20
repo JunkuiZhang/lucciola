@@ -5,8 +5,8 @@ namespace lucciola {
 Sequence::Sequence(
     int seq_id, const std::vector<int> &prompt_token_ids, int block_size)
     : seq_id_(seq_id), status_(SequenceStatus::WAITING),
-      prompt_len_(prompt_token_ids.size()), block_size_(block_size),
-      token_ids_(prompt_token_ids) {}
+      prompt_len_(prompt_token_ids.size()), prefill_offset_(0),
+      block_size_(block_size), token_ids_(prompt_token_ids) {}
 
 void Sequence::append_token_id(int token_id) { token_ids_.push_back(token_id); }
 

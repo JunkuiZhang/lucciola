@@ -60,4 +60,21 @@ void append_paged_kv_cache(
     const int max_blocks_per_seq,
     cudaStream_t stream = nullptr);
 
+void chunked_paged_attention_forward(
+    void *out,     // [num_seqs, chunk_size, num_heads, head_dim]
+    const void *q, // [num_seqs, chunk_size, num_heads, head_dim]
+    void *k_cache,
+    void *v_cache,
+    const int *block_tables, // [num_seqs, max_blocks_per_seq]
+    const int
+        *context_lens, // [num_seqs] : total context length up to this chunk
+    const int num_seqs,
+    const int chunk_size,
+    const int num_heads,
+    const int num_kv_heads,
+    const int head_dim,
+    const int block_size,
+    const int max_blocks_per_seq,
+    cudaStream_t stream = nullptr);
+
 } // namespace lucciola::kernels

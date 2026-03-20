@@ -215,4 +215,152 @@ void paged_attention_forward(
         max_blocks_per_seq);
 }
 
+__global__ void chunked_paged_attention_kernel(
+    __nv_bfloat16 *__restrict__ out,
+    const __nv_bfloat16 *__restrict__ q,
+    const __nv_bfloat16 *__restrict__ k_cache,
+    const __nv_bfloat16 *__restrict__ v_cache,
+    const int *__restrict__ block_tables,
+    const int *__restrict__ context_lens,
+    const int num_seqs,
+    const int chunk_size,
+    const int num_heads,
+    const int num_kv_heads,
+    const int head_dim,
+    const int block_size,
+    const int max_blocks_per_seq) {
+
+    int s = blockIdx.y;
+    int h = blockIdx.x;
+    int q_idx = blockIdx.z;
+    int tid = threadIdx.x;
+
+    if (s >= num_seqs || h >= num_heads || q_idx >= chunk_size)
+        return;
+
+    int total_len = context_lens[s]; // The max length so far
+    int past_len = total_len - chunk_size;
+    int prompt_len =
+        past_len + q_idx + 1; // context length for this query token
+    int kv_h = h / (num_heads / num_kv_heads);
+
+    // Q for this token:
+    const __nv_bfloat16 *q_row = q + s * chunk_size * num_heads * head_dim +
+                                 q_idx * num_heads * head_dim + h * head_dim;
+
+    extern __shared__ float smem[];
+    float *q_smem = smem; // size = head_dim * sizeof(float)
+    if (tid < head_dim) {
+        q_smem[tid] = __bfloat162float(q_row[tid]);
+    }
+    __syncthreads();
+
+    float scale = 1.0f / sqrtf((float)head_dim);
+    // Since we can't allocate dynamic shared memory per token if prompt is very
+    // long, we use a fixed shared memory array for the max tokens we support in
+    // chunk mode, e.g. 16384 max length or similar? Actually we can just do a
+    // loop with local_max and sum_exp across chunks to do flash attention
+    // style, but for simplicity, wait, we can just use 4096 local shared
+    // memory?
+    __shared__ float scores[4096];
+
+    if (tid < prompt_len && tid < 4096) {
+        int logical_block_idx = tid / block_size;
+        int physical_block_idx =
+            block_tables[s * max_blocks_per_seq + logical_block_idx];
+        int block_offset = tid % block_size;
+
+        long long k_idx = (long long)physical_block_idx * block_size *
+                              num_kv_heads * head_dim +
+                          (long long)block_offset * num_kv_heads * head_dim +
+                          (long long)kv_h * head_dim;
+
+        float sum = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            sum += q_smem[d] * __bfloat162float(k_cache[k_idx + d]);
+        }
+        scores[tid] = sum * scale;
+    } else if (tid < 4096) {
+        scores[tid] = -1e20f;
+    }
+    __syncthreads();
+
+    float local_max = -1e20f;
+    for (int i = 0; i < prompt_len && i < 4096; i++) {
+        local_max = fmaxf(local_max, scores[i]);
+    }
+
+    if (tid < prompt_len && tid < 4096) {
+        scores[tid] = expf(scores[tid] - local_max);
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        float sum_exp = 0.0f;
+        for (int i = 0; i < prompt_len && i < 4096; i++)
+            sum_exp += scores[i];
+        for (int i = 0; i < prompt_len && i < 4096; i++)
+            scores[i] /= sum_exp;
+    }
+    __syncthreads();
+
+    if (tid < head_dim) {
+        float out_val = 0.0f;
+        for (int j = 0; j < prompt_len && j < 4096; ++j) {
+            int logical_block_idx = j / block_size;
+            int physical_block_idx =
+                block_tables[s * max_blocks_per_seq + logical_block_idx];
+            int block_offset = j % block_size;
+
+            long long v_idx =
+                (long long)physical_block_idx * block_size * num_kv_heads *
+                    head_dim +
+                (long long)block_offset * num_kv_heads * head_dim +
+                (long long)kv_h * head_dim + tid;
+            out_val += scores[j] * __bfloat162float(v_cache[v_idx]);
+        }
+
+        long long out_idx = (long long)s * chunk_size * num_heads * head_dim +
+                            (long long)q_idx * num_heads * head_dim +
+                            (long long)h * head_dim + tid;
+        out[out_idx] = __float2bfloat16(out_val);
+    }
+}
+
+void chunked_paged_attention_forward(
+    void *out,
+    const void *q,
+    void *k_cache,
+    void *v_cache,
+    const int *block_tables,
+    const int *context_lens,
+    const int num_seqs,
+    const int chunk_size,
+    const int num_heads,
+    const int num_kv_heads,
+    const int head_dim,
+    const int block_size,
+    const int max_blocks_per_seq,
+    cudaStream_t stream) {
+
+    dim3 grid(num_heads, num_seqs, chunk_size);
+    int threads = 1024;
+    size_t smem = head_dim * sizeof(float);
+
+    chunked_paged_attention_kernel<<<grid, threads, smem, stream>>>(
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        reinterpret_cast<const __nv_bfloat16 *>(q),
+        reinterpret_cast<const __nv_bfloat16 *>(k_cache),
+        reinterpret_cast<const __nv_bfloat16 *>(v_cache),
+        block_tables,
+        context_lens,
+        num_seqs,
+        chunk_size,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        block_size,
+        max_blocks_per_seq);
+}
+
 } // namespace lucciola::kernels

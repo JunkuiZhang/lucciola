@@ -643,60 +643,81 @@ void QwenBlock::forward_paged(
         stream);
 
     // 5. Append K/V to Paged Cache
-    int seq_len_per_req =
-        num_tokens /
-        num_seqs; // If we assume all seqs process same amount of tokens this
-                  // step... In real vLLM, Prefill and Decode are separate. For
-                  // Phase 1 we assume Decode-only or padding
-    if (meta.is_prompt) {
-        // Prefill - append everything
-        // For MVP we assume we process 1 sequence's prompt at a time or we pad
-        // them. Let's assume seq_len_per_req = prompt_len for simplicity of
-        // append.
-        seq_len_per_req = meta.context_lens[0];
-    } else {
-        seq_len_per_req = 1;
-    }
+    int num_decode_seqs = meta.num_decode_seqs;
+    int num_prefill_seqs = meta.num_prefill_seqs;
+    int chunk_size = meta.num_prefill_tokens;
 
-    kernels::append_paged_kv_cache(
-        k_cache_,
-        v_cache_,
-        k_buf_,
-        v_buf_,
-        d_context_lens,
-        d_block_tables,
-        num_seqs,
-        seq_len_per_req,
-        num_kv_heads_,
-        head_dim_,
-        block_size,
-        meta.max_blocks_per_seq,
-        stream);
+    // Evaluate memory offsets
+    int kv_stride = num_kv_heads_ * head_dim_;
+    int q_stride = num_heads_ * head_dim_;
 
-    // 6. Attention Routing
-    if (meta.is_prompt) {
-        // Prefill uses intra-request self-attention over the current newly
-        // embedded tokens For MVP, we assume 1 sequence per prefill batch
-        kernels::prefill_attention_forward(
-            attn_out_buf_,
-            q_buf_,
-            k_buf_,
-            v_buf_,
-            seq_len_per_req, // length of the prompt
-            num_heads_,
+    short *k_buf_ptr = static_cast<short *>(k_buf_);
+    short *v_buf_ptr = static_cast<short *>(v_buf_);
+    short *q_buf_ptr = static_cast<short *>(q_buf_);
+    short *attn_out_ptr = static_cast<short *>(attn_out_buf_);
+
+    if (num_decode_seqs > 0) {
+        kernels::append_paged_kv_cache(
+            k_cache_,
+            v_cache_,
+            k_buf_ptr,
+            v_buf_ptr,
+            d_context_lens,
+            d_block_tables,
+            num_decode_seqs,
+            1,
             num_kv_heads_,
             head_dim_,
+            block_size,
+            meta.max_blocks_per_seq,
             stream);
-    } else {
-        // Decode uses Paged Attention
+    }
+
+    if (num_prefill_seqs > 0) {
+        kernels::append_paged_kv_cache(
+            k_cache_,
+            v_cache_,
+            k_buf_ptr + num_decode_seqs * kv_stride,
+            v_buf_ptr + num_decode_seqs * kv_stride,
+            d_context_lens + num_decode_seqs,
+            d_block_tables + num_decode_seqs * meta.max_blocks_per_seq,
+            num_prefill_seqs,
+            chunk_size,
+            num_kv_heads_,
+            head_dim_,
+            block_size,
+            meta.max_blocks_per_seq,
+            stream);
+    }
+
+    // 6. Attention Routing
+    if (num_decode_seqs > 0) {
         kernels::paged_attention_forward(
-            attn_out_buf_,
-            q_buf_,
+            attn_out_ptr,
+            q_buf_ptr,
             k_cache_,
             v_cache_,
             d_context_lens,
             d_block_tables,
-            num_seqs,
+            num_decode_seqs,
+            num_heads_,
+            num_kv_heads_,
+            head_dim_,
+            block_size,
+            meta.max_blocks_per_seq,
+            stream);
+    }
+
+    if (num_prefill_seqs > 0) {
+        kernels::chunked_paged_attention_forward(
+            attn_out_ptr + num_decode_seqs * q_stride,
+            q_buf_ptr + num_decode_seqs * q_stride,
+            k_cache_,
+            v_cache_,
+            d_block_tables + num_decode_seqs * meta.max_blocks_per_seq,
+            d_context_lens + num_decode_seqs,
+            num_prefill_seqs,
+            chunk_size,
             num_heads_,
             num_kv_heads_,
             head_dim_,
@@ -799,13 +820,14 @@ void QwenModel::step_with_paged_attention(InputMetadata &meta) {
 
     // Construct pos_ids
     std::vector<int> h_pos_ids;
-    for (int i = 0; i < num_seqs; i++) {
-        if (meta.is_prompt) {
-            for (int p = 0; p < meta.context_lens[i]; p++)
-                h_pos_ids.push_back(p);
-        } else {
-            h_pos_ids.push_back(meta.context_lens[i] - 1);
-        }
+    for (int i = 0; i < meta.num_decode_seqs; i++) {
+        h_pos_ids.push_back(meta.context_lens[i] - 1);
+    }
+    for (int i = meta.num_decode_seqs; i < num_seqs; i++) {
+        int chunk_size = meta.num_prefill_tokens;
+        int start_pos = meta.context_lens[i] - chunk_size;
+        for (int p = start_pos; p < meta.context_lens[i]; p++)
+            h_pos_ids.push_back(p);
     }
     cudaMemcpy(
         pos_ids_buf_,
@@ -844,20 +866,26 @@ void QwenModel::step_with_paged_attention(InputMetadata &meta) {
         1e-6f,
         0);
 
-    // Extract next token
-    // For decode, hidden_states_buf has shape [num_seqs, hidden_size]
-    // For prefill MVP with 1 sequence, we take the last token of the prompt.
-    void *target_hidden_state = hidden_states_buf_;
-    if (meta.is_prompt) {
-        target_hidden_state = static_cast<short *>(hidden_states_buf_) +
-                              (num_tokens - 1) * config_.hidden_size;
+    // Pack last token of each sequence into the first num_seqs rows of
+    // hidden_states_buf_
+    short *d_hidden = static_cast<short *>(hidden_states_buf_);
+    for (int i = 0; i < meta.num_prefill_seqs; i++) {
+        int token_idx =
+            meta.num_decode_seqs + (i + 1) * meta.num_prefill_tokens - 1;
+        cudaMemcpyAsync(
+            d_hidden + (meta.num_decode_seqs + i) * config_.hidden_size,
+            d_hidden + token_idx * config_.hidden_size,
+            config_.hidden_size * sizeof(short),
+            cudaMemcpyDeviceToDevice,
+            0);
     }
+    cudaStreamSynchronize(0);
 
     kernels::linear_forward(
         logits_buf_,
-        target_hidden_state,
+        d_hidden,
         lm_head_weight_,
-        num_seqs, // Valid for MVP (1 prefill seq) and Decode
+        num_seqs,
         config_.vocab_size,
         config_.hidden_size,
         0);
@@ -873,7 +901,12 @@ void QwenModel::step_with_paged_attention(InputMetadata &meta) {
         cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < num_seqs; i++) {
-        meta.seqs[i]->append_token_id(next_tokens[i]);
+        bool is_prefilling =
+            (i >= meta.num_decode_seqs) && (meta.seqs[i]->get_prefill_offset() <
+                                            meta.seqs[i]->get_prompt_len());
+        if (!is_prefilling) {
+            meta.seqs[i]->append_token_id(next_tokens[i]);
+        }
     }
 }
 } // namespace lucciola
