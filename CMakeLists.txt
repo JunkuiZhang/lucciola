@@ -71,6 +71,7 @@ add_library(lucciola STATIC
     src/kernels/argmax.cu
     src/kernels/attention_paged.cu
     src/kernels/add.cu
+    src/kernels/flash_attention.cu
     src/kernels/learn/softmax.cu
     src/kernels/learn/sgemm.cu
 )
