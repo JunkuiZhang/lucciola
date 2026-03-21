@@ -12,26 +12,32 @@ void sgemm_cutlass_forward(
     int N,
     int K,
     cudaStream_t stream) {
+
     using RowMajor = cutlass::layout::RowMajor;
     using Gemm = cutlass::gemm::device::
         Gemm<float, RowMajor, float, RowMajor, float, RowMajor, float>;
 
     Gemm gemm_op;
 
-    // Construct arguments
+    // 1. 修复传参错位问题：使用大括号 {1.0f, 0.0f}
     typename Gemm::Arguments args(
-        {M, N, K}, // GemmCoord
-        {A, K},    // A: pointer, stride
-        {B, N},    // B: pointer, stride
-        {C, N},    // C: pointer, stride
-        {C, N},    // D: pointer, stride (output)
-        {1.0f, 0.0f});
+        {M, N, K}, {A, K}, {B, N}, {C, N}, {C, N}, {1.0f, 0.0f}
+        // Epilogue: {alpha, beta}
+    );
+
+    // 2. 增加 can_implement 拦截器（最佳实践）
+    cutlass::Status status = gemm_op.can_implement(args);
+    if (status != cutlass::Status::kSuccess) {
+        printf("[CUTLASS] GEMM Config not supported: %d\n", int(status));
+        return;
+    }
 
     size_t workspace_size = gemm_op.get_workspace_size(args);
-
     void *workspace = nullptr;
+
+    // 3. 修复同步阻塞问题：使用异步分配 API
     if (workspace_size > 0) {
-        cudaError_t e = cudaMalloc(&workspace, workspace_size);
+        cudaError_t e = cudaMallocAsync(&workspace, workspace_size, stream);
         if (e != cudaSuccess) {
             printf(
                 "[CUTLASS] workspace alloc failed: %s\n",
@@ -40,13 +46,16 @@ void sgemm_cutlass_forward(
         }
     }
 
-    cutlass::Status status = gemm_op.initialize(args, workspace, stream);
-    if (status == cutlass::Status::kSuccess) {
-        status = gemm_op.run(stream);
+    status = gemm_op(args, workspace, stream);
+
+    if (status != cutlass::Status::kSuccess) {
+        printf("[CUTLASS] GEMM failed: %d\n", int(status));
     }
 
-    if (workspace)
-        cudaFree(workspace);
+    // 释放异步内存
+    if (workspace) {
+        cudaFreeAsync(workspace, stream);
+    }
 }
 
 const int BLOCK_SIZE = 16;

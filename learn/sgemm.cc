@@ -1,6 +1,6 @@
 #include "kernels/learn/sgemm.h"
 #include <cmath>
-#include <format>
+#include <cstdio>
 
 #define BLOCK_SIZE 16
 
@@ -10,8 +10,12 @@
 bool verify_matrix(float *C_cpu, float *C_gpu, int M, int N) {
     for (int i = 0; i < M * N; i++) {
         if (fabs(C_cpu[i] - C_gpu[i]) > 1e-4) {
-            std::format(
-                "Mismatch at {}: CPU={}, GPU={}", i, C_cpu[i], C_gpu[i]);
+            std::fprintf(
+                stderr,
+                "Mismatch at %d: CPU=%f, GPU=%f\n",
+                i,
+                C_cpu[i],
+                C_gpu[i]);
             return false;
         }
     }
@@ -23,7 +27,9 @@ bool verify_matrix(float *C_cpu, float *C_gpu, int M, int N) {
 // ========================================================
 int main() {
     // 矩阵维度 (1024x1024 是个不错的测试大小)
-    int M = 1024, N = 1024, K = 1024;
+    // int M = 1024, N = 1024, K = 1024;
+    int M = 2048, N = 2048, K = 2048;
+    // int M = 8192, N = 8192, K = 8192;
     size_t size_A = M * K * sizeof(float);
     size_t size_B = K * N * sizeof(float);
     size_t size_C = M * N * sizeof(float);
