@@ -6,6 +6,7 @@
 #include "kernels/argmax.h"
 #include "kernels/attention.h"
 #include "kernels/embedding.h"
+#include "kernels/flash_attention.h"
 #include "kernels/linear.h"
 #include "kernels/rmsnorm.h"
 #include "kernels/rope.h"
@@ -709,7 +710,7 @@ void QwenBlock::forward_paged(
     }
 
     if (num_prefill_seqs > 0) {
-        kernels::chunked_paged_attention_forward(
+        kernels::launch_lucciola_attention(
             attn_out_ptr + num_decode_seqs * q_stride,
             q_buf_ptr + num_decode_seqs * q_stride,
             k_cache_,
@@ -721,9 +722,9 @@ void QwenBlock::forward_paged(
             num_heads_,
             num_kv_heads_,
             head_dim_,
-            block_size,
             meta.max_blocks_per_seq,
-            stream);
+            stream
+        );
     }
 
     // 7. Output proj

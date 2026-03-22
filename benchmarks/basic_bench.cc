@@ -10,8 +10,8 @@ int main() {
     std::cout << "        Lucciola Performance Benchmark       " << std::endl;
     std::cout << "=============================================" << std::endl;
 
-    // Load Model
     lucciola::QwenModel qwen("/home/zjk/cuda/lucciola/models/Qwen3-0.6B");
+    qwen.init_paged_kv_cache(1024, 16);
 
     // Prepare Prompt
     std::string prompt =
